@@ -47,7 +47,7 @@
     }
 
     /// The revision and dimension come from the system,
-    /// and the fingerprint comes from `scripts/generate-identifier-goldens.py`.
+    /// and the fingerprint comes from `mise run generate:goldens`.
     @Test("The identifier matches the independent implementation")
     func identifierGolden() throws {
       let model = try #require(NaturalLanguageEmbeddingModel(language: .english))

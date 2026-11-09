@@ -45,7 +45,7 @@
       }
     }
 
-    /// The expected values come from `scripts/generate-identifier-goldens.py`.
+    /// The expected values come from `mise run generate:goldens`.
     @Test("Identifiers match the independent implementation")
     func identifierGoldens() {
       #expect(

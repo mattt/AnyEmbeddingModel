@@ -1,3 +1,5 @@
+#!/usr/bin/env -S uv run --script
+#MISE description="Print the expected identifiers for the identifier tests"
 # /// script
 # requires-python = ">=3.12"
 # ///
@@ -6,7 +8,7 @@
 This is an independent implementation of the format in
 Sources/AnyEmbeddingModel/Shared/Identifier.swift.
 
-Usage: uv run scripts/generate-identifier-goldens.py
+Usage: mise run generate:goldens
 """
 
 import struct

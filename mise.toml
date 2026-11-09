@@ -1,0 +1,26 @@
+# Swift comes from Xcode or the Command Line Tools, not from mise.
+# The MLX tasks need Apple silicon and the Metal toolchain.
+
+[tools]
+uv = "0.13.1"
+
+[tasks.build]
+description = "Build the package without traits"
+run = "xcrun swift build"
+
+[tasks.test]
+description = "Run the tests without MLX or model downloads"
+run = "xcrun swift test"
+
+[tasks."test:hub"]
+description = "Run the MLX tests with real models from the Hugging Face Hub"
+env = { ANY_EMBEDDING_MODEL_TEST_HUB = "1" }
+run = "mise run test:mlx"
+
+[tasks.lint]
+description = "Check the formatting and lint rules"
+run = "xcrun swift format lint --strict --recursive ."
+
+[tasks.format]
+description = "Format the Swift sources in place"
+run = "xcrun swift format --in-place --recursive ."

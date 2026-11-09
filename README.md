@@ -207,25 +207,26 @@ Change `revision` when this happens so that the identifier changes too.
 
 ## Development
 
-The package's tests run on macOS:
+The package's tasks use [mise](https://mise.jdx.dev),
+and its tests run on macOS:
 
 | Command | Description |
 | --- | --- |
-| `swift test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
-| `scripts/test-traits.sh` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
-| `ANY_EMBEDDING_MODEL_TEST_HUB=1 scripts/test-traits.sh` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
+| `mise run test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
+| `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
+| `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
 
-The trait script uses Swift Build and has been run with Swift 6.4.
+The `test:mlx` task uses Swift Build and has been run with Swift 6.4.
 It copies `default.metallib` from the MLX bundle
 beside the test binary as `mlx.metallib`, where the test process can find it.
 It removes the copy after the run
 so that it does not invalidate the test bundle's signature on the next build.
-The script stops with an error if the toolchain cannot produce the library.
+The task stops with an error if the toolchain cannot produce the library.
 
 The real-model tests download model files as needed.
 One test also asks the Hub whether each preset's commit exists.
-`scripts/generate-reference-fixtures.py` regenerates the reference vectors
-with `uv run` and pinned package versions.
+`mise run generate:fixtures` regenerates the reference vectors
+with pinned package versions.
 
 ## License
 
