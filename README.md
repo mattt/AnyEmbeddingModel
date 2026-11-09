@@ -1,8 +1,9 @@
 # AnyEmbeddingModel
 
-AnyEmbeddingModel gives one Swift API for text embeddings,
-with a choice of engine.
-Change the engine, and the code that uses it stays the same.
+AnyEmbeddingModel is a Swift package for text embeddings
+with a choice of backend.
+Each backend implements the same `EmbeddingModel` protocol
+for queries and documents:
 
 ```swift
 import AnyEmbeddingModel
@@ -21,35 +22,21 @@ let query = try await model.embed("Where does my sister live?", for: .query)
 let similarities = documents.map { zip($0, query).reduce(0) { $0 + $1.0 * $1.1 } }
 ```
 
-Every engine keeps the same promises:
+Three backends are available:
 
-- `embed` returns one vector for each text, in order.
-- Each vector has `dimension` elements and a length of 1.
-- You pass plain text and a purpose, `.query` or `.document`,
-  and the engine adds any prefix that its model needs.
-- `identifier` changes whenever the vectors could change,
-  so you can save it with your vectors
-  and embed your texts again when it changes.
-
-## Engines
-
-| Type | Runs on | Trait | Dependencies |
-| --- | --- | --- | --- |
-| `NaturalLanguageEmbeddingModel` | The system's sentence embedding | none | none |
-| `OpenAIEmbeddingModel` | A server that accepts OpenAI's `/v1/embeddings` format | none | none |
-| `MLXEmbeddingModel` | The GPU, with [MLX](https://github.com/ml-explore/mlx-swift-lm) | `MLX` | mlx-swift-lm, swift-transformers, swift-huggingface |
+- [NaturalLanguage](#naturallanguage) uses Apple's system sentence embeddings.
+- [MLX](#mlx) runs models from the Hugging Face Hub on the GPU.
+- [OpenAI](#openai) calls servers that accept the `/v1/embeddings` format.
 
 ## Requirements
 
 - Swift 6.2 or later
 - macOS 14, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
-- For the `MLX` trait, a platform that mlx-swift-lm supports, which excludes watchOS
-
-The package's tests run on macOS.
+- For MLX, Apple silicon and the Metal toolchain; watchOS is not supported.
 
 ## Installation
 
-Add the package to your `Package.swift` file:
+Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
@@ -57,79 +44,75 @@ dependencies: [
 ]
 ```
 
-With no traits, the package has no dependencies,
-and SwiftPM doesn't download any.
-
-### Traits
-
-The `MLX` trait adds `MLXEmbeddingModel` and its dependencies:
+Without traits, the package requires no third-party dependencies
+and provides the NaturalLanguage and OpenAI backends.
+Enable the `MLX` trait to add `MLXEmbeddingModel`
+and its dependencies, mlx-swift-lm, swift-transformers, and swift-huggingface:
 
 ```swift
-dependencies: [
-    .package(
-        url: "https://github.com/mattt/AnyEmbeddingModel.git",
-        from: "0.1.0",
-        traits: ["MLX"]
-    )
-]
+.package(
+    url: "https://github.com/mattt/AnyEmbeddingModel.git",
+    from: "0.1.0",
+    traits: ["MLX"]
+)
 ```
 
-If your Xcode project can't enable a package trait directly,
-add a small local package that depends on this one with the trait,
-and depend on that package from your project.
+If your Xcode project cannot enable a package trait directly,
+create a local package that enables the trait
+and add that package to your project.
+If dependency resolution fails with
+"exhausted attempts to resolve the dependencies graph,"
+add the trait's dependencies to your package as well.
 
-Resolving packages with traits can fail with
-"exhausted attempts to resolve the dependencies graph."
-If this happens,
-add the dependencies of the trait to your own package as well.
+## Usage
 
-### MLX's Metal library
+`embed(_:for:)` accepts one text or an array of texts.
+It returns one `[Float]` vector per text, in input order,
+with `dimension` elements and a length of 1.
+Use the same model for queries and documents.
 
-MLX needs a compiled Metal library at run time.
-Without one, it stops with "Failed to load the default metallib."
-What you need to do depends on how you build:
+Pass plain text and a purpose, `.query` or `.document`.
+The backend adds the configured prefix for that purpose.
+MLX presets configure their own prefixes;
+for other models, set `prefixes` to match the model.
+`EmbeddingPrefixes` provides `.bge`, `.e5`, `.nomic`, and `.qwen3(task:)`,
+or you can supply your own query and document strings.
 
-- **An app in Xcode.**
-  [mlx-swift](https://github.com/ml-explore/mlx-swift) builds its shaders through Xcode,
-  so an Xcode build needs no extra step.
-- **An executable with `swift build`.**
-  SwiftPM's native build system doesn't compile Metal shaders.
-  The Swift Build system does,
-  and the executable finds the library in the `mlx-swift_Cmlx.bundle` next to it.
-  Swift Build is the default in Xcode's Swift 6.4 toolchain.
-  If yours defaults to the native build system,
-  try `swift build --build-system swiftbuild`.
-- **Tests with `swift test`.**
-  Even with Swift Build, a test process doesn't find that bundle.
-  Copy `default.metallib` from the bundle next to the test binary,
-  with the name `mlx.metallib`, for the test run.
-  Remove the copy after the run,
-  because it breaks the test bundle's code signature on the next build.
-  [scripts/test-traits.sh](scripts/test-traits.sh) does this for this package.
-  The script selects Swift Build, stops with an error if the toolchain can't produce the library,
-  and has been run with Swift 6.4.
+Store `identifier` with saved vectors,
+and embed the texts again when it changes.
+The identifier includes the model's revision and settings that affect vectors.
+For remote models and local MLX files,
+you must update the revision or version when the model changes,
+as described below.
 
-## Using each engine
+## Backends
 
 ### NaturalLanguage
 
-`NLEmbedding`'s sentence embedding is part of the operating system,
-so there is nothing to download.
-Its initializer returns `nil` if the system has no sentence embedding for a language.
+`NaturalLanguageEmbeddingModel` uses the operating system's sentence embeddings,
+so it needs no model download.
+Its initializer returns `nil`
+if the system has no sentence embedding for the requested language or revision.
 
 ```swift
 let model = NaturalLanguageEmbeddingModel(language: .english)
 ```
 
+By default, the model uses the current system revision.
+Pass `revision:` to select a supported revision across system updates.
+
 ### MLX
 
-The presets know their dimension and prefixes,
-and they pin an exact commit of the model:
+`MLXEmbeddingModel` loads models through
+[mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm)
+and downloads them from the Hugging Face Hub.
+It requires the `MLX` trait.
+The presets configure the dimension and prefixes and pin a model commit:
 
 ```swift
 let model = MLXEmbeddingModel.bgeSmallEnglish
 
-// Optional: download and load the model now.
+// Optional: download and load the model before the first embedding.
 try await model.prewarm()
 
 let vectors = try await model.embed(["I like tea."], for: .document)
@@ -137,10 +120,13 @@ let vectors = try await model.embed(["I like tea."], for: .document)
 
 The presets are `bgeSmallEnglish`, `allMiniLM`, `nomicEmbedText`,
 and `qwen3Embedding(task:)`.
+`embed` loads the model if needed, so `prewarm()` is optional.
+A preset keeps its pinned commit until a package update changes it.
+A new commit changes the identifier.
 
-For another model, pass a full commit hash and the dimension.
-The initializer throws for a branch name,
-because a branch can move to new weights while its name stays the same:
+For another model, pass its dimension, prefixes,
+and a full, lowercase, 40-character commit hash.
+The initializer rejects branch and tag names:
 
 ```swift
 let model = try MLXEmbeddingModel(
@@ -151,8 +137,7 @@ let model = try MLXEmbeddingModel(
 )
 ```
 
-To start from a branch or a tag, ask the Hub for its commit.
-Save `revision` from the result to load the same model again without the network:
+To start from a branch or tag, resolve its current commit through the Hub:
 
 ```swift
 let model = try await MLXEmbeddingModel.resolving(
@@ -161,16 +146,34 @@ let model = try await MLXEmbeddingModel.resolving(
     dimension: 384,
     prefixes: .bge
 )
-print(model.revision)  // A full commit hash
+print(model.revision)  // A full commit hash.
 ```
 
-If the branch moves, the next call returns a model with a different `identifier`.
+Resolving a branch or tag requires the network.
+Save the returned `revision` and pass it as `commit:`
+to avoid that lookup next time.
+Loading still requires the model files.
+If the branch moves, a new call to `resolving` returns a different identifier.
 
-### A server
+To load files from disk, use `init(directory:name:version:dimension:)`.
+Change `version` whenever the files change,
+and do not change files while that version is in use.
 
-`OpenAIEmbeddingModel` sends the OpenAI embeddings request format,
-which Hugging Face Text Embeddings Inference and other servers also accept.
-The package's tests use a local mock server.
+#### Metal library
+
+MLX needs a compiled Metal library at runtime.
+Without it, MLX stops with "Failed to load the default metallib."
+Xcode builds the shaders automatically.
+For an executable built with SwiftPM, use the Swift Build system,
+which puts the library in `mlx-swift_Cmlx.bundle` beside the executable.
+If your toolchain uses the native build system by default,
+pass `--build-system swiftbuild` to `swift build`.
+See [Development](#development) for the extra step needed by tests.
+
+### OpenAI
+
+`OpenAIEmbeddingModel` sends `POST {baseURL}/embeddings`
+using the OpenAI embeddings request format:
 
 ```swift
 import AnyEmbeddingModel
@@ -184,55 +187,44 @@ let model = OpenAIEmbeddingModel(
 )
 ```
 
-To use a hosted service, pass `apiKey`.
-The format has no field for the purpose of a text,
-so the model adds `prefixes` to each text before it sends the request.
+Pass `apiKey` if the server requires a bearer token.
+The backend adds `prefixes` before sending each text.
+If the server supports shorter vectors,
+set `requestsDimension: true` to send `dimension` in the request.
 
-A client can't tell when a server changes the model behind a name.
-If you know that it happened, change the `revision` parameter,
-which is part of the identifier.
+The client cannot detect when a server changes the model behind a name.
+Change `revision` when this happens so that the identifier changes too.
 
-## Using a model with Recall
+## Limitations
 
-[Recall](https://github.com/mattt/Recall) is a local memory store for Swift.
-Neither package depends on the other.
-A short closure connects them:
+- MLX truncates text to `maximumTokenCount` without reporting it,
+  or to the model's token limit if it is smaller.
+  The default is 512 tokens; the `allMiniLM` preset uses 256.
+  The package does not split long texts.
+- The OpenAI backend sends text without truncation;
+  the server determines how to handle long input.
+- The MLX backend does not produce shorter vectors from Matryoshka models.
 
-```swift
-import AnyEmbeddingModel
-import Foundation
-import Recall
+## Development
 
-let model = MLXEmbeddingModel.bgeSmallEnglish
-let embedder = Embedder(identifier: model.identifier) { text, purpose in
-    try await model.embed([text], for: purpose == .query ? .query : .document)[0]
-}
-let url = URL.documentsDirectory.appending(path: "memories.sqlite")
-let store = try MemoryStore(url: url, embedder: embedder)
-```
+The package's tests run on macOS:
 
-## Limits
+| Command | Description |
+| --- | --- |
+| `swift test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
+| `scripts/test-traits.sh` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
+| `ANY_EMBEDDING_MODEL_TEST_HUB=1 scripts/test-traits.sh` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
 
-- Long texts: the MLX engine truncates a text to `maximumTokenCount` without an error,
-  and the package doesn't split long texts.
-  It is meant for short texts, such as notes and passages.
-- Shorter vectors: for MLX, the package doesn't produce shorter vectors from Matryoshka models.
+The trait script uses Swift Build and has been run with Swift 6.4.
+It copies `default.metallib` from the MLX bundle
+beside the test binary as `mlx.metallib`, where the test process can find it.
+It removes the copy after the run
+so that it does not invalidate the test bundle's signature on the next build.
+The script stops with an error if the toolchain cannot produce the library.
 
-[docs/design.md](docs/design.md) explains the design and these choices.
-
-## Testing
-
-- `swift test` needs neither MLX nor the network.
-  It uses a local mock server and stub loads.
-- `scripts/test-traits.sh` adds the MLX code that needs no real model,
-  with a local server in place of the Hub.
-- `ANY_EMBEDDING_MODEL_TEST_HUB=1 scripts/test-traits.sh` also loads real models
-  and checks them against the reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`.
-  It downloads the models on the first run,
-  and it can run from the cache after that,
-  except for one test that asks the Hub whether each preset's commit exists.
-
-`scripts/generate-reference-fixtures.py` regenerates the reference vectors,
+The real-model tests download model files as needed.
+One test also asks the Hub whether each preset's commit exists.
+`scripts/generate-reference-fixtures.py` regenerates the reference vectors
 with `uv run` and pinned package versions.
 
 ## License
