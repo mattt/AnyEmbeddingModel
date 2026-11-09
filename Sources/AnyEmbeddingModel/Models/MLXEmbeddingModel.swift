@@ -71,7 +71,8 @@
     /// After ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``,
     /// save this value and pass it to
     /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
-    /// to load the same model again without the network.
+    /// to skip the branch lookup next time.
+    /// Loading the model still requires its files.
     public let revision: String
 
     /// A local directory with the model files,
@@ -105,6 +106,9 @@
     /// The identifier has ``modelId``, ``revision``, ``dimension``,
     /// and a fingerprint of ``prefixes`` and ``maximumTokenCount``.
     public let identifier: String
+
+    /// The key of the loader that this model shares with its copies.
+    let loaderKey: ModelLoaderKey
 
     private let loader: ModelLoader<EmbedderModelContainer>
 
@@ -200,7 +204,8 @@
     /// This call needs the network unless `revision` is already a full commit hash.
     /// Save ``revision`` from the result and pass it to
     /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
-    /// to start without the network and to keep the same vectors.
+    /// to skip this lookup and keep the same vectors.
+    /// Loading the model still requires its files.
     ///
     /// - Parameters:
     ///   - modelId: The repository of the model on the Hugging Face Hub.
@@ -307,7 +312,12 @@
       )
       // A local version is part of the key,
       // so that a new version of a directory loads its new files.
-      let key = "\(directory?.path ?? modelId)@\(revision)"
+      let key = ModelLoaderKey(
+        source: directory == nil ? .hub : .directory,
+        location: directory?.path ?? modelId,
+        version: revision
+      )
+      self.loaderKey = key
       self.loader = LoaderRegistry.loader(for: key) {
         let tokenizerLoader = #huggingFaceTokenizerLoader()
         if let directory {
@@ -544,11 +554,11 @@
 
   /// The loaders of every model in this process, by the key of the files that they load.
   private enum LoaderRegistry {
-    static let loaders = Locked<[String: ModelLoader<EmbedderModelContainer>]>([:])
+    static let loaders = Locked<[ModelLoaderKey: ModelLoader<EmbedderModelContainer>]>([:])
 
     /// Returns the loader for a key, and creates it with `load` if there is none.
     static func loader(
-      for key: String,
+      for key: ModelLoaderKey,
       load: @escaping @Sendable () async throws -> EmbedderModelContainer
     ) -> ModelLoader<EmbedderModelContainer> {
       loaders.withLock { loaders in

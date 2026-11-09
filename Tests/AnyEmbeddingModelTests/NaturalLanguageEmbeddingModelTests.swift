@@ -46,6 +46,16 @@
       #expect(a == c)
     }
 
+    /// The revision and dimension come from the system,
+    /// and the fingerprint comes from `scripts/generate-identifier-goldens.py`.
+    @Test("The identifier matches the independent implementation")
+    func identifierGolden() throws {
+      let model = try #require(NaturalLanguageEmbeddingModel(language: .english))
+      #expect(
+        model.identifier
+          == "naturallanguage/sentence-en/\(model.revision)/\(model.dimension)/cf21924e7b0ff7c7")
+    }
+
     @Test("Rejects empty text")
     func emptyText() async throws {
       let model = try #require(NaturalLanguageEmbeddingModel(language: .english))

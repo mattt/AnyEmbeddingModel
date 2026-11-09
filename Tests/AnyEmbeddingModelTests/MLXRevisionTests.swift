@@ -45,6 +45,34 @@
       }
     }
 
+    /// The expected values come from `scripts/generate-identifier-goldens.py`.
+    @Test("Identifiers match the independent implementation")
+    func identifierGoldens() {
+      #expect(
+        MLXEmbeddingModel.bgeSmallEnglish.identifier
+          == "mlx/BAAI%2Fbge-small-en-v1.5/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/384/17ad23889b01fd7d"
+      )
+      #expect(
+        MLXEmbeddingModel.allMiniLM.identifier
+          == "mlx/sentence-transformers%2Fall-MiniLM-L6-v2/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/384/e51e86d76f482409"
+      )
+      #expect(
+        MLXEmbeddingModel.nomicEmbedText.identifier
+          == "mlx/nomic-ai%2Fnomic-embed-text-v1.5/e9b6763023c676ca8431644204f50c2b100d9aab/768/b01ebd07491df7f0"
+      )
+      #expect(
+        MLXEmbeddingModel.qwen3Embedding().identifier
+          == "mlx/mlx-community%2FQwen3-Embedding-0.6B-4bit-DWQ/6c3ae70858513f1a78e9cdca3cae330d9075cd2a/1024/ffbd1da9e469cda1"
+      )
+      #expect(
+        MLXEmbeddingModel(
+          directory: URL(fileURLWithPath: "/tmp/golden"),
+          name: "my model",
+          version: "v/1",
+          dimension: 3
+        ).identifier == "mlx/my%20model/v%2F1/3/d681d181ef369d3a")
+    }
+
     @Test("Each preset pins a full commit hash")
     func presetsArePinned() {
       let presets: [MLXEmbeddingModel] = [
@@ -206,6 +234,52 @@
       let secondVector = try await second.embed(text, for: .document)
       #expect(cosine(secondVector, miniLMVector) > 0.9999)
       #expect(cosine(secondVector, firstVector) < 0.9)
+    }
+
+    @Test("Text in a path and a version can't make two local models share a loader")
+    func loaderKeyBoundaries() {
+      let a = MLXEmbeddingModel(
+        directory: URL(fileURLWithPath: "/tmp/a@b"), name: "m", version: "c", dimension: 3)
+      let b = MLXEmbeddingModel(
+        directory: URL(fileURLWithPath: "/tmp/a"), name: "m", version: "b@c", dimension: 3)
+      #expect(a.loaderKey != b.loaderKey)
+    }
+
+    @Test("Loading one model doesn't change a model whose path and version look alike")
+    func loaderStateIsSeparate() async throws {
+      let base = "/nonexistent-\(UUID().uuidString)/a"
+      let a = MLXEmbeddingModel(
+        directory: URL(fileURLWithPath: base + "@b"), name: "m", version: "c", dimension: 3)
+      let b = MLXEmbeddingModel(
+        directory: URL(fileURLWithPath: base), name: "m", version: "b@c", dimension: 3)
+      defer {
+        a.unload()
+        b.unload()
+      }
+
+      await #expect(throws: (any Error).self) { try await a.prewarm() }
+      guard case .unavailable(.failedToLoad) = a.availability else {
+        Issue.record("The failed load wasn't reported: \(a.availability)")
+        return
+      }
+      #expect(b.availability == .unavailable(.notLoaded))
+
+      b.unload()
+      guard case .unavailable(.failedToLoad) = a.availability else {
+        Issue.record("Unloading the other model changed this one: \(a.availability)")
+        return
+      }
+    }
+
+    @Test("A directory and a hub model that look alike have different loaders")
+    func directoryAndHubModelKeys() throws {
+      let path = "/tmp/org/model"
+      let directory = MLXEmbeddingModel(
+        directory: URL(fileURLWithPath: path), name: "m", version: commitA, dimension: 3)
+      let hub = try MLXEmbeddingModel(modelId: path, commit: commitA, dimension: 3)
+      #expect(directory.loaderKey.location == hub.loaderKey.location)
+      #expect(directory.loaderKey.version == hub.loaderKey.version)
+      #expect(directory.loaderKey != hub.loaderKey)
     }
 
     @Test("A local model's identifier uses its version and not its path")

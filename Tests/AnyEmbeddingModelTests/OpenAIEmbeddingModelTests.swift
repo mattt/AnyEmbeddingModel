@@ -2,7 +2,7 @@
   import Foundation
   import Testing
 
-  import AnyEmbeddingModel
+  @testable import AnyEmbeddingModel
 
   @Suite("OpenAIEmbeddingModel", .serialized)
   struct OpenAIEmbeddingModelTests {
@@ -99,53 +99,79 @@
       }
     }
 
-    @Test("Removes the key from a JSON error, each time it appears")
-    func redactsJSONError() async throws {
+    private static let withheld = OpenAIEmbeddingModel.withheldMessage
+
+    @Test("Withholds a JSON error that contains the key")
+    func withholdsJSONError() async throws {
       let message = "Bad key \(Self.key). Rejected \(Self.key)."
       try await withServer(.error(status: 401, message: message)) { _, url in
         let (error, text) = await errorText(model(url))
-        #expect(
-          error as? EmbeddingError
-            == .httpStatus(401, message: "Bad key <redacted>. Rejected <redacted>."))
+        #expect(error as? EmbeddingError == .httpStatus(401, message: Self.withheld))
         #expect(!text.contains(Self.key))
       }
     }
 
-    @Test("Removes the key from a plain-text error, each time it appears")
-    func redactsPlainTextError() async throws {
+    @Test("Withholds a plain-text error that contains the key")
+    func withholdsPlainTextError() async throws {
       let body = "\(Self.key) is invalid: \(Self.key)"
       try await withServer(.text(status: 403, body: body)) { _, url in
         let (error, text) = await errorText(model(url))
-        #expect(
-          error as? EmbeddingError == .httpStatus(403, message: "<redacted> is invalid: <redacted>")
-        )
+        #expect(error as? EmbeddingError == .httpStatus(403, message: Self.withheld))
         #expect(!text.contains(Self.key))
       }
     }
 
     @Test(
-      "Removes the key in the forms that a server encodes it",
+      "Withholds the key in each form that a server can encode it",
       arguments: [
-        #"{"detail": "bad sk-secret\/one+two"}"#, "bad sk%2Dsecret%2Fone%2Btwo",
+        #"{"detail":"sk-secret/one+two"}"#,
+        #"{"detail": "bad sk-secret\/one+two"}"#,
+        #"{"detail":"\u0073k-secret/one+two"}"#,
+        #"{"detail":"\u0073\u006B-secret\u002Fone\u002btwo"}"#,
+        "bad sk%2Dsecret%2Fone%2Btwo",
         "bad sk-secret%2Fone%2Btwo",
+        "sk-secret%2fone%2btwo",
+        "sk-secret%252Fone%252Btwo",
+        "SK-SECRET/ONE+TWO",
+        #"{"error":{"message":"bad","param":"sk-secret/one+two"}}"#,
       ]
     )
-    func redactsEncodedForms(body: String) async throws {
+    func withholdsEncodedForms(body: String) async throws {
       try await withServer(.text(status: 401, body: body)) { _, url in
-        let (_, text) = await errorText(model(url))
-        #expect(text.contains("<redacted>"))
-        #expect(!text.contains("secret"))
+        let (error, text) = await errorText(model(url))
+        #expect(error as? EmbeddingError == .httpStatus(401, message: Self.withheld))
+        #expect(!text.lowercased().contains("secret/one"))
+        #expect(!text.contains("%2"))
       }
     }
 
-    @Test("Removes the key from an unreadable response")
-    func redactsDecodingError() async throws {
+    @Test("Withholds an unreadable response that contains the key")
+    func withholdsDecodingError() async throws {
       // The response has the wrong type where the decoder expects an array.
-      let body = #"{"data": "\#(Self.key)"}"#
-      try await withServer(.text(status: 200, body: body)) { _, url in
-        let (error, text) = await errorText(model(url))
-        #expect(error is EmbeddingError)
-        #expect(!text.contains(Self.key))
+      for value in [Self.key, "sk-secret%2fone%2btwo"] {
+        let body = #"{"data": "\#(value)"}"#
+        try await withServer(.text(status: 200, body: body)) { _, url in
+          let (error, text) = await errorText(model(url))
+          #expect(error as? EmbeddingError == .invalidResponse(Self.withheld))
+          #expect(!text.contains(value))
+        }
+      }
+    }
+
+    @Test("Keeps the server's text when it doesn't contain the key")
+    func keepsOrdinaryErrors() async throws {
+      try await withServer(.text(status: 503, body: "Overloaded: 100% of capacity")) { _, url in
+        let (error, _) = await errorText(model(url))
+        #expect(
+          error as? EmbeddingError == .httpStatus(503, message: "Overloaded: 100% of capacity"))
+      }
+      try await withServer(.text(status: 200, body: #"{"data": "nope"}"#)) { _, url in
+        let (error, _) = await errorText(model(url))
+        guard case .invalidResponse(let message) = error as? EmbeddingError else {
+          Issue.record("Expected an invalid response, got \(String(describing: error)).")
+          return
+        }
+        #expect(message != Self.withheld)
       }
     }
 
@@ -212,6 +238,30 @@
       #expect(a.identifier != c.identifier)
       #expect(a.identifier != d.identifier)
       #expect(a.identifier.hasPrefix("openai/m/-/3/"))
+    }
+
+    /// The expected values come from `scripts/generate-identifier-goldens.py`.
+    @Test("Identifiers match the independent implementation")
+    func identifierGoldens() {
+      let url = URL(string: "http://a.example/v1")!
+      #expect(
+        OpenAIEmbeddingModel(baseURL: url, model: "text-embedding-3-small", dimension: 1536)
+          .identifier == "openai/text-embedding-3-small/-/1536/11dac35ef0813626")
+      #expect(
+        OpenAIEmbeddingModel(
+          baseURL: url,
+          model: "nomic-embed-text:latest",
+          dimension: 768,
+          requestsDimension: true,
+          prefixes: .nomic,
+          revision: "2"
+        ).identifier == "openai/nomic-embed-text%3Alatest/2/768/99860da7f4726551")
+      #expect(
+        OpenAIEmbeddingModel(baseURL: url, model: "mod\u{E8}le", dimension: 3).identifier
+          == "openai/mod%C3%A8le/-/3/11dac35ef0813626")
+      #expect(
+        OpenAIEmbeddingModel(baseURL: url, model: "mode\u{300}le", dimension: 3).identifier
+          == "openai/mode%CC%80le/-/3/11dac35ef0813626")
     }
 
     @Test("The public initializer can't produce colliding identifiers")

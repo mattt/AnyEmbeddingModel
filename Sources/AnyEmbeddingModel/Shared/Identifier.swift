@@ -6,10 +6,20 @@
 /// such as the prefixes,
 /// so that the identifier stays short but still changes when they change.
 ///
-/// Two different sets of values never have the same encoding:
-/// a slash inside a field is percent-encoded,
-/// so the slashes between fields are the only slashes,
-/// and the fingerprint hashes each setting with its length.
+/// Two different sets of values never have the same encoding.
+/// Each field is the percent-encoding of its UTF-8 bytes,
+/// and only ASCII letters, digits, `-`, `.`, `_`, and `~` stay as they are.
+/// So an identifier is pure ASCII,
+/// the slashes between fields are the only slashes,
+/// and a combining mark can't attach to a slash and hide it.
+/// The fingerprint hashes each setting with its length.
+///
+/// Identity is by bytes.
+/// The package doesn't normalize Unicode,
+/// so composed and decomposed forms of the same text are different identifiers,
+/// even though Swift compares those strings as equal.
+/// The two forms reach a tokenizer as different bytes,
+/// and they can produce different vectors.
 ///
 /// For example:
 /// `mlx/BAAI%2Fbge-small-en-v1.5/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/384/17ad23889b01fd7d`.
@@ -33,12 +43,29 @@ enum Identifier {
     return fields.joined(separator: "/")
   }
 
-  /// Returns `field` with the characters that would make its boundaries unclear
-  /// percent-encoded.
+  /// Returns the percent-encoding of the UTF-8 bytes of `field`.
   ///
-  /// Only `%` and `/` change, so that most fields stay as they are.
+  /// The hexadecimal digits are uppercase,
+  /// so a field has exactly one encoding.
   static func encode(_ field: String) -> String {
-    field.replacing("%", with: "%25").replacing("/", with: "%2F")
+    var encoded = ""
+    for byte in field.utf8 {
+      if isUnreserved(byte) {
+        encoded.unicodeScalars.append(Unicode.Scalar(byte))
+      } else {
+        let digits = String(byte, radix: 16, uppercase: true)
+        encoded += "%" + (digits.count == 1 ? "0" : "") + digits
+      }
+    }
+    return encoded
+  }
+
+  /// Returns whether `byte` is an ASCII letter or digit, or one of `-`, `.`, `_`, and `~`.
+  private static func isUnreserved(_ byte: UInt8) -> Bool {
+    switch byte {
+    case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, 0x2D, 0x2E, 0x5F, 0x7E: true
+    default: false
+    }
   }
 
   private static func encodeRevision(_ revision: String) -> String {

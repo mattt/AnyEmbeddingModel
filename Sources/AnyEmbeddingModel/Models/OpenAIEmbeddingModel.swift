@@ -77,6 +77,12 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
   ///   - revision: A string that changes ``identifier``
   ///     when the server changes the model behind the same name.
   ///   - apiKey: A key to send as a bearer token, or `nil` to send none.
+  ///     If a response contains the key, errors omit the server's text
+  ///     and say that it was withheld.
+  ///     The model looks for the key after it decodes JSON escapes and percent-encoding,
+  ///     in any ASCII case, and it also withholds text that it can't decode with confidence.
+  ///     It can't detect part of a key, such as a masked copy,
+  ///     or a key in another encoding, such as Base64.
   ///   - maximumBatchSize: The maximum number of texts in one request.
   ///   - session: The URL session that sends the requests.
   public init(
@@ -134,13 +140,22 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     return vectors
   }
 
-  /// Returns `text` with every occurrence of the API key replaced.
+  /// The message in an error when the server's own text might contain the API key.
+  static let withheldMessage =
+    "The server's response was withheld because it might contain the API key."
+
+  /// Returns `text`, or ``withheldMessage`` if the response might disclose the API key.
   ///
-  /// A server can echo the credential that it rejected.
-  /// Text from a server reaches errors, and errors reach logs.
-  private func redacted(_ text: String) -> String {
+  /// A server can echo the credential that it rejected,
+  /// and text from a server reaches errors, and errors reach logs.
+  /// The check covers the whole response,
+  /// so a key outside the error message also withholds the text.
+  /// ``CredentialScreen`` describes what it can't detect.
+  private func screened(_ text: String, response body: Data) -> String {
     guard let apiKey else { return text }
-    return apiKey.redact(from: text)
+    let screen = CredentialScreen(credential: apiKey.value)
+    return screen.isClear(Array(body)) && screen.isClear(Array(text.utf8))
+      ? text : Self.withheldMessage
   }
 
   /// An API key that doesn't appear when the model is printed or dumped.
@@ -152,29 +167,6 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     var description: String { "<redacted>" }
     var debugDescription: String { "<redacted>" }
     var customMirror: Mirror { Mirror(self, children: [:]) }
-
-    /// Returns `text` with every form of the key that a server could send replaced:
-    /// the key itself, as it appears escaped in JSON, and percent-encoded.
-    func redact(from text: String) -> String {
-      guard !value.isEmpty else { return text }
-      let escaped =
-        (try? JSONEncoder().encode(value))
-        .map { String(decoding: $0.dropFirst().dropLast(), as: UTF8.self) } ?? value
-      let forms = [
-        value,
-        escaped,
-        escaped.replacing("/", with: "\\/"),
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value,
-        value.addingPercentEncoding(
-          withAllowedCharacters: CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: "-._~"))
-        ) ?? value,
-      ]
-      // Longer forms first, so that a shorter form can't split a longer one.
-      return Set(forms).sorted { $0.count > $1.count }.reduce(text) {
-        $0.replacing($1, with: "<redacted>")
-      }
-    }
   }
 
   private struct Request: Encodable {
@@ -222,7 +214,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
       let message =
         (try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message)
         ?? String(decoding: data, as: UTF8.self)
-      throw EmbeddingError.httpStatus(http.statusCode, message: redacted(message))
+      throw EmbeddingError.httpStatus(http.statusCode, message: screened(message, response: data))
     }
 
     let decoded: Response
@@ -230,7 +222,8 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
       decoded = try JSONDecoder().decode(Response.self, from: data)
     } catch {
       // A decoding error can quote a value from the response.
-      throw EmbeddingError.invalidResponse(redacted(String(describing: error)))
+      throw EmbeddingError.invalidResponse(
+        screened(String(describing: error), response: data))
     }
     guard decoded.data.count == inputs.count else {
       throw EmbeddingError.wrongVectorCount(expected: inputs.count, actual: decoded.data.count)

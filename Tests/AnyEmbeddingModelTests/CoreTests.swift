@@ -60,6 +60,30 @@ struct CoreTests {
     #expect(literal != slash)
   }
 
+  @Test("A combining mark can't hide a field boundary")
+  func combiningMarkFraming() {
+    let a = Identifier.make(
+      engine: "e", model: "a/\u{301}b", revision: "\u{301}c", dimension: 3, settings: [])
+    let b = Identifier.make(
+      engine: "e", model: "a", revision: "\u{301}b/\u{301}c", dimension: 3, settings: [])
+    #expect(Array(a.utf8) != Array(b.utf8))
+    #expect(a.utf8.allSatisfy { $0 < 128 })
+    #expect(a.split(separator: "/").count == 5)
+    #expect(b.split(separator: "/").count == 5)
+  }
+
+  @Test("Composed and decomposed text are different identifiers")
+  func unicodeNormalization() {
+    let composed = Identifier.make(
+      engine: "e", model: "mod\u{E8}le", revision: nil, dimension: 3, settings: [])
+    let decomposed = Identifier.make(
+      engine: "e", model: "mode\u{300}le", revision: nil, dimension: 3, settings: [])
+    #expect(composed != decomposed)
+    #expect(composed.hasPrefix("e/mod%C3%A8le/"))
+    #expect(decomposed.hasPrefix("e/mode%CC%80le/"))
+    #expect(Identifier.fingerprint(["\u{E8}"]) != Identifier.fingerprint(["e\u{300}"]))
+  }
+
   @Test("No revision is distinct from a revision that looks like the placeholder")
   func missingRevision() {
     let none = Identifier.make(engine: "e", model: "m", revision: nil, dimension: 3, settings: [])

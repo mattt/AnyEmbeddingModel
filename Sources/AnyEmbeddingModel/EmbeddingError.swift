@@ -31,9 +31,15 @@ public enum EmbeddingError: Error, Hashable, Sendable {
   case invalidCommit(String)
 
   /// A server returned an HTTP status that isn't a success,
-  /// with the body of the response.
+  /// with the server's message.
+  ///
+  /// If the response might contain the API key,
+  /// the message says that the server's text was withheld.
   case httpStatus(Int, message: String)
 
   /// A server returned a response that the model can't read.
+  ///
+  /// If the response might contain the API key,
+  /// the description says that the server's text was withheld.
   case invalidResponse(String)
 }
