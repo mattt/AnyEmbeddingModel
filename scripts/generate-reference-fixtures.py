@@ -1,0 +1,195 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "sentence-transformers==5.7.0",
+#   # Nomic's remote code calls a method that transformers 5 removed.
+#   "transformers==4.57.6",
+#   "torch==2.15.0",
+#   "tokenizers==0.22.2",
+#   "einops==0.8.2",
+#   "numpy==2.5.4",
+# ]
+# ///
+"""Writes the reference vectors that MLXEmbeddingModel is tested against.
+
+For each preset, this script records what sentence-transformers produces
+at a pinned commit: the token IDs and the unit vector for each text.
+It runs on the CPU and downloads each model from the Hugging Face Hub.
+For Nomic, it runs that repository's remote code at a pinned commit.
+
+Usage, from the package directory:
+    uv run scripts/generate-reference-fixtures.py
+"""
+
+import importlib.metadata
+import json
+from pathlib import Path
+
+from sentence_transformers import SentenceTransformer
+
+OUTPUT = Path("Tests/AnyEmbeddingModelTests/Fixtures")
+PACKAGES = [
+    "sentence-transformers",
+    "transformers",
+    "torch",
+    "tokenizers",
+    "einops",
+    "numpy",
+]
+NOMIC_CODE_REVISION = "7710840340a098cfb869c4f65e87cf2b1b70caca"
+QWEN3_TASK = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+
+PRESETS = [
+    {
+        "key": "bge-small",
+        "preset_model": "BAAI/bge-small-en-v1.5",
+        "preset_commit": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "reference_model": "BAAI/bge-small-en-v1.5",
+        "reference_commit": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "document_prefix": "",
+        "maximum_token_count": 512,
+    },
+    {
+        "key": "minilm",
+        "preset_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "preset_commit": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        "reference_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "reference_commit": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        "query_prefix": "",
+        "document_prefix": "",
+        "maximum_token_count": 256,
+    },
+    {
+        "key": "nomic",
+        "preset_model": "nomic-ai/nomic-embed-text-v1.5",
+        "preset_commit": "e9b6763023c676ca8431644204f50c2b100d9aab",
+        "reference_model": "nomic-ai/nomic-embed-text-v1.5",
+        "reference_commit": "e9b6763023c676ca8431644204f50c2b100d9aab",
+        "query_prefix": "search_query: ",
+        "document_prefix": "search_document: ",
+        "maximum_token_count": 512,
+        "code_revision": NOMIC_CODE_REVISION,
+    },
+    {
+        "key": "qwen3",
+        # The preset is a 4-bit quantization, and the reference is full precision.
+        "preset_model": "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+        "preset_commit": "6c3ae70858513f1a78e9cdca3cae330d9075cd2a",
+        "reference_model": "Qwen/Qwen3-Embedding-0.6B",
+        "reference_commit": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        "query_prefix": f"Instruct: {QWEN3_TASK}\nQuery:",
+        "document_prefix": "",
+        "maximum_token_count": 512,
+    },
+]
+
+TEXTS = [
+    ("short-query", "query", "Which antibiotic gives me a bad reaction?"),
+    ("other-query", "query", "Where does Papa reside?"),
+    ("short-document", "document", "I'm allergic to penicillin."),
+    ("other-document", "document", "The bike shed code changed to 5094."),
+    (
+        "medium-document",
+        "document",
+        "Our team standup moved to 10:15, starting in March, because of the new schedule.",
+    ),
+    (
+        "long-document",
+        "document",
+        (
+            "My sister Mirela lives in Ghent with her two kids, and we visit her every "
+            "spring. She teaches mathematics at a secondary school near the river, and "
+            "on weekends she plays cello in a community orchestra with her oldest friend."
+        ),
+    ),
+]
+
+
+def repeated_text(model, prefix, target):
+    """Returns repeated words with exactly `target` tokens after the prefix and specials."""
+
+    def count(words):
+        text = prefix + " ".join(["tea"] * words)
+        return len(model.tokenizer(text, truncation=False)["input_ids"])
+
+    words = max(target - count(1) + 1, 1)
+    while count(words) < target:
+        words += 1
+    while count(words) > target:
+        words -= 1
+    if count(words) != target:
+        raise ValueError(f"No text has exactly {target} tokens.")
+    return " ".join(["tea"] * words)
+
+
+def main():
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    for preset in PRESETS:
+        kwargs = {}
+        if "code_revision" in preset:
+            revision = {"code_revision": preset["code_revision"]}
+            kwargs = {
+                "trust_remote_code": True,
+                "model_kwargs": revision,
+                "config_kwargs": revision,
+            }
+        model = SentenceTransformer(
+            preset["reference_model"],
+            revision=preset["reference_commit"],
+            device="cpu",
+            **kwargs,
+        )
+        limit = preset["maximum_token_count"]
+        model.max_seq_length = limit
+
+        document = preset["document_prefix"]
+        query = preset["query_prefix"]
+        cases = [*TEXTS]
+        for name, target in [
+            ("below-limit", limit - 1),
+            ("at-limit", limit),
+            ("above-limit", limit + 1),
+            ("far-above-limit", limit + 100),
+        ]:
+            cases.append((name, "document", repeated_text(model, document, target)))
+        cases.append(
+            ("query-above-limit", "query", repeated_text(model, query, limit + 1))
+        )
+
+        records = []
+        for name, purpose, text in cases:
+            prefixed = (query if purpose == "query" else document) + text
+            tokens = model.tokenize([prefixed])["input_ids"][0].tolist()
+            vector = model.encode(
+                [prefixed],
+                normalize_embeddings=True,
+                batch_size=1,
+                convert_to_numpy=True,
+            )[0]
+            records.append(
+                {
+                    "name": name,
+                    "purpose": purpose,
+                    "text": text,
+                    "tokens": tokens,
+                    "vector": [round(float(value), 7) for value in vector],
+                }
+            )
+
+        fixture = {
+            **{key: value for key, value in preset.items() if key != "key"},
+            "packages": {name: importlib.metadata.version(name) for name in PACKAGES},
+            "cases": records,
+        }
+        path = OUTPUT / f"reference-{preset['key']}.json"
+        path.write_text(
+            json.dumps(fixture, separators=(",", ":"), ensure_ascii=False) + "\n"
+        )
+        print(f"{path}: {len(records)} cases")
+
+
+if __name__ == "__main__":
+    main()
