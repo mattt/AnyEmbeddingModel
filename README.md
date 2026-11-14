@@ -231,4 +231,4 @@ with pinned package versions.
 ## License
 
 AnyEmbeddingModel is available under the MIT license.
-See [LICENSE.md](LICENSE.md) for details.
+See [LICENSE](LICENSE) for details.
