@@ -212,10 +212,19 @@ and its tests run on macOS:
 
 | Command | Description |
 | --- | --- |
+| `mise run setup` | Resolve the dependencies of the package and of every trait. |
+| `mise run build` | Build the library without traits. |
+| `mise run build:mlx` | Build the library with the `MLX` trait. |
+| `mise run build:ios` | Compile the library for iOS with `xcodebuild`. |
+| `mise run lint` | Check the formatting and lint rules. |
+| `mise run format` | Format the Swift sources in place. |
 | `mise run test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
 | `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
 | `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
 
+The MLX tasks look for the Metal compiler in the downloaded Metal toolchain
+when `xcrun` cannot find it,
+and stop with the command that downloads it if it is missing.
 The `test:mlx` task uses Swift Build and has been run with Swift 6.4.
 It copies `default.metallib` from the MLX bundle
 beside the test binary as `mlx.metallib`, where the test process can find it.

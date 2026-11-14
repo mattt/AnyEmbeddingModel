@@ -1,16 +1,68 @@
 # Swift comes from Xcode or the Command Line Tools, not from mise.
-# The MLX tasks need Apple silicon and the Metal toolchain.
+# MLX tasks need Apple silicon and the Metal toolchain.
 
 [tools]
 uv = "0.13.1"
 
+[tasks.setup]
+description = "Resolve Swift package dependencies, including those of every trait"
+run = "mise run _swift -- package resolve --enable-all-traits"
+
 [tasks.build]
-description = "Build the package without traits"
-run = "xcrun swift build"
+description = "Build the library without traits"
+run = "mise run _swift -- build"
+
+[tasks."build:mlx"]
+description = "Build the library with the MLX trait"
+run = "mise run _swift:mlx -- build --traits MLX"
+
+[tasks."build:ios"]
+description = "Compile the library for iOS"
+run = "xcodebuild build -scheme AnyEmbeddingModel -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO -quiet"
 
 [tasks.test]
-description = "Run the tests without MLX or model downloads"
-run = "xcrun swift test"
+description = "Run the library tests without MLX or model downloads"
+run = "mise run _swift -- test"
+
+[tasks."test:mlx"]
+description = "Run the library tests with the MLX trait, using a local server in place of the Hub"
+usage = 'arg "[args]" var=#true help="Arguments for swift test"'
+run = '''
+#!/usr/bin/env bash
+# SwiftPM builds MLX's Metal library into mlx-swift_Cmlx.bundle,
+# but MLX doesn't find that bundle from a test process.
+# MLX also searches for mlx.metallib next to the binary,
+# so this task copies the library there for the test run
+# and removes it after the run.
+# A copy left in the test bundle breaks its code signature on the next build.
+set -euo pipefail
+
+if ! xcrun swift build --help | grep -q "swiftbuild"; then
+    echo "error: this toolchain's SwiftPM has no Swift Build system," >&2
+    echo "which this task needs to compile MLX's Metal library." >&2
+    echo "Use a newer toolchain, or build and test MLX code with Xcode." >&2
+    exit 1
+fi
+
+options=(--build-system swiftbuild --traits MLX)
+
+mise run _swift:mlx -- build --build-tests "${options[@]}"
+
+products="$(mise run _swift:mlx -- build "${options[@]}" --show-bin-path)"
+metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+copy="$products/AnyEmbeddingModelTests.xctest/Contents/MacOS/mlx.metallib"
+if [ ! -f "$metallib" ]; then
+    echo "error: this toolchain didn't produce MLX's Metal library: $metallib" >&2
+    echo "This task has been run with Swift 6.4." >&2
+    exit 1
+fi
+cp "$metallib" "$copy"
+trap 'rm -f "$copy"' EXIT
+
+# mise shell-quotes the arguments in usage_args.
+eval "set -- ${usage_args:-}"
+mise run _swift:mlx -- test --skip-build "${options[@]}" "$@"
+'''
 
 [tasks."test:hub"]
 description = "Run the MLX tests with real models from the Hugging Face Hub"
@@ -19,8 +71,44 @@ run = "mise run test:mlx"
 
 [tasks.lint]
 description = "Check the formatting and lint rules"
-run = "xcrun swift format lint --strict --recursive ."
+run = "mise run _swift -- format lint --strict --recursive ."
 
 [tasks.format]
 description = "Format the Swift sources in place"
-run = "xcrun swift format --in-place --recursive ."
+run = "mise run _swift -- format --in-place --recursive ."
+
+[tasks."_swift"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    exec xcrun swift "$@"
+fi
+
+exec swift "$@"
+'''
+
+[tasks."_swift:mlx"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! xcrun --find metal >/dev/null 2>&1; then
+    metal_bin=""
+    for candidate in /private/var/run/com.apple.security.cryptexd/mnt/*MetalToolchain*/Metal.xctoolchain/usr/bin; do
+        if [ -x "$candidate/metal" ]; then
+            metal_bin="$candidate"
+        fi
+    done
+    if [ -z "$metal_bin" ]; then
+        echo "error: Metal compiler not found. Run: xcodebuild -downloadComponent MetalToolchain" >&2
+        exit 1
+    fi
+    export PATH="$metal_bin:$PATH"
+fi
+
+exec xcrun swift "$@"
+'''
