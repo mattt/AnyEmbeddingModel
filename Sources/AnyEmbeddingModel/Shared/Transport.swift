@@ -32,6 +32,10 @@ public protocol HTTPTransport: Sendable {
     ///   once it returns, the request is over, and the body can't be read anymore.
     /// - A transport that retries a request doesn't retry it
     ///   once it has passed a response to `responseHandler`.
+    /// - It doesn't follow a redirect that changes the scheme, the host, or the port,
+    ///   so that no request, credential, or body reaches another origin.
+    ///   It passes the redirect response to `responseHandler` instead,
+    ///   or throws without calling it.
     ///
     /// - Parameters:
     ///   - request: The request to send.
@@ -109,12 +113,40 @@ private final class Iterating<Iterator: AsyncIteratorProtocol>: ChunkSource wher
     }
 }
 
+/// Returns whether two URLs have the same scheme, host, and port,
+/// counting a missing port as the scheme's default port.
+func haveSameOrigin(_ first: URL, _ second: URL) -> Bool {
+    func origin(_ url: URL) -> (scheme: String?, host: String?, port: Int?) {
+        let scheme = url.scheme?.lowercased()
+        let defaultPort: Int? =
+            switch scheme {
+            case "http": 80
+            case "https": 443
+            default: nil
+            }
+        return (scheme, url.host?.lowercased(), url.port ?? defaultPort)
+    }
+    let a = origin(first)
+    let b = origin(second)
+    return a.scheme != nil && a.host != nil && a.scheme == b.scheme && a.host == b.host && a.port == b.port
+}
+
 #if AsyncHTTPClient
     /// The transport a remote model sends its requests with unless it's given another:
-    /// AsyncHTTPClient's shared client.
+    /// an AsyncHTTPClient client with the shared client's configuration,
+    /// except that it follows no redirects.
     public func makeDefaultTransport() -> any HTTPTransport {
-        HTTPClient.shared
+        defaultHTTPClient
     }
+
+    /// A client like `HTTPClient.shared` that doesn't follow redirects.
+    ///
+    /// It's never shut down, as it lasts as long as the process.
+    private let defaultHTTPClient: HTTPClient = {
+        var configuration = HTTPClient.Configuration.singletonConfiguration
+        configuration.redirectConfiguration = .disallow
+        return HTTPClient(eventLoopGroup: HTTPClient.defaultEventLoopGroup, configuration: configuration)
+    }()
 #elseif os(WASI)
     /// WASI has no networking of its own, so a remote model needs its `transport` given,
     /// such as one that sends requests with the host's `fetch`.

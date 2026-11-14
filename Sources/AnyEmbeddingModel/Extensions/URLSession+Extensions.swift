@@ -108,6 +108,11 @@ import HTTPTypes
     /// made with this session's configuration,
     /// as FoundationNetworking can't send requests at once through one session:
     /// this session's delegate isn't used there.
+    ///
+    /// It follows a redirect only to the same scheme, host, and port.
+    /// For a redirect to another origin,
+    /// it passes the redirect response to the response handler and sends nothing more,
+    /// whatever the session's own delegate would decide.
     extension URLSession: HTTPTransport {
         public func send<Return>(
             request: HTTPRequest,
@@ -278,6 +283,27 @@ import HTTPTypes
         ) {
             state.withLock { Self.take(&$0.responseContinuation) }?.resume(returning: response)
             completionHandler(.allow)
+        }
+
+        /// Follows a redirect only to the origin of the request that the task started with.
+        ///
+        /// A task's own delegate receives this message before the session's delegate,
+        /// so a session's delegate can't send a request to another origin.
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping @Sendable (URLRequest?) -> Void
+        ) {
+            guard let original = task.originalRequest?.url, let target = request.url,
+                haveSameOrigin(original, target)
+            else {
+                // The redirect response becomes the task's response.
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
