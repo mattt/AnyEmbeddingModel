@@ -21,8 +21,8 @@
             /// A JSON body with status 200, for any request.
             case json(String)
 
-            /// A plain-text body with the status.
-            case text(status: Int, body: String)
+            /// A plain-text body with the status, and extra response headers.
+            case text(status: Int, body: String, headers: [String: String] = [:])
         }
 
         /// A request that the server received.
@@ -143,6 +143,7 @@
             let status: Int
             var payload: Any = [:]
             var text: String?
+            var headers: [String: String] = [:]
             switch behavior {
             case .vectors(let dimension):
                 status = 200
@@ -153,9 +154,10 @@
             case .json(let json):
                 status = 200
                 payload = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) ?? [:]
-            case .text(let code, let body):
+            case .text(let code, let body, let extra):
                 status = code
                 text = body
+                headers = extra
             case .error(let code, let message):
                 status = code
                 payload = ["error": ["message": message, "type": "invalid_request_error"]]
@@ -163,13 +165,14 @@
             let body =
                 text.map { Data($0.utf8) } ?? (try? JSONSerialization.data(withJSONObject: payload))
                 ?? Data()
+            let extraHeaders = headers.map { "\($0.key): \($0.value)\r\n" }.joined()
             var response = Data(
                 """
                 HTTP/1.1 \(status) Status\r
                 Content-Type: application/json\r
                 Content-Length: \(body.count)\r
                 Connection: close\r
-                \r
+                \(extraHeaders)\r
 
                 """.utf8
             )

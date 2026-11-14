@@ -19,6 +19,10 @@ let package = Package(
             name: "MLX",
             description: "Enables MLXEmbeddingModel, which runs embedding models with MLX."
         ),
+        .trait(
+            name: "AsyncHTTPClient",
+            description: "Sends OpenAIEmbeddingModel's requests with AsyncHTTPClient by default."
+        ),
         .default(enabledTraits: []),
     ],
     dependencies: [
@@ -29,11 +33,22 @@ let package = Package(
         ),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.5.0"),
     ],
     targets: [
         .target(
             name: "AnyEmbeddingModel",
             dependencies: [
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(
+                    name: "HTTPTypesFoundation",
+                    package: "swift-http-types",
+                    // It extends URLSession, which WASI doesn't have.
+                    condition: .when(platforms: [
+                        .macOS, .macCatalyst, .iOS, .tvOS, .watchOS, .visionOS, .linux, .windows, .android,
+                    ])
+                ),
                 .product(
                     name: "MLXEmbedders",
                     package: "mlx-swift-lm",
@@ -59,6 +74,11 @@ let package = Package(
                     package: "swift-transformers",
                     condition: .when(traits: ["MLX"])
                 ),
+                .product(
+                    name: "AsyncHTTPClient",
+                    package: "async-http-client",
+                    condition: .when(traits: ["AsyncHTTPClient"])
+                ),
             ]
         ),
         .testTarget(
@@ -69,6 +89,11 @@ let package = Package(
                     name: "HuggingFace",
                     package: "swift-huggingface",
                     condition: .when(traits: ["MLX"])
+                ),
+                .product(
+                    name: "AsyncHTTPClient",
+                    package: "async-http-client",
+                    condition: .when(traits: ["AsyncHTTPClient"])
                 ),
             ],
             exclude: ["Fixtures"]

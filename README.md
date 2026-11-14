@@ -44,10 +44,15 @@ dependencies: [
 ]
 ```
 
-Without traits, the package requires no third-party dependencies
-and provides the NaturalLanguage and OpenAI backends.
-Enable the `MLX` trait to add `MLXEmbeddingModel`
-and its dependencies, mlx-swift-lm, swift-transformers, and swift-huggingface:
+Without traits, the package provides the NaturalLanguage and OpenAI backends,
+and its only dependency is Apple's
+[swift-http-types](https://github.com/apple/swift-http-types).
+Each trait adds a feature and its dependencies:
+
+| Trait | Feature | Dependencies |
+| --- | --- | --- |
+| `MLX` | `MLXEmbeddingModel` | mlx-swift-lm, swift-transformers, swift-huggingface |
+| `AsyncHTTPClient` | AsyncHTTPClient as the default transport for `OpenAIEmbeddingModel` | async-http-client |
 
 ```swift
 .package(
@@ -195,6 +200,16 @@ set `requestsDimension: true` to send `dimension` in the request.
 The client cannot detect when a server changes the model behind a name.
 Change `revision` when this happens so that the identifier changes too.
 
+The model sends its requests through an `HTTPTransport`,
+the same protocol that AnyLanguageModel uses.
+By default, `makeDefaultTransport()` returns a `URLSession`,
+or an AsyncHTTPClient client when the `AsyncHTTPClient` trait is enabled.
+Pass `transport:` to use another `URLSession`, an `HTTPClient`,
+or your own type that conforms to `HTTPTransport`.
+
+If the server rejects a request, the model throws `HTTPTransportError`
+with the response and its body.
+
 ## Limitations
 
 - MLX truncates text to `maximumTokenCount` without reporting it,
@@ -221,6 +236,9 @@ and its tests run on macOS:
 | `mise run test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
 | `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
 | `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
+
+To run the tests with AsyncHTTPClient as the default transport,
+run `mise run test -- --traits AsyncHTTPClient`.
 
 The MLX tasks look for the Metal compiler in the downloaded Metal toolchain
 when `xcrun` cannot find it,

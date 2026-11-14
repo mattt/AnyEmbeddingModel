@@ -1,7 +1,7 @@
 import Foundation
-
-#if canImport(FoundationNetworking)
-    import FoundationNetworking
+import HTTPTypes
+#if !os(WASI)
+    import HTTPTypesFoundation
 #endif
 
 /// An embedding model on a server that accepts the OpenAI embeddings request format.
@@ -64,7 +64,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     public let identifier: String
 
     private let apiKey: APIKey?
-    private let session: URLSession
+    private let transport: any HTTPTransport
 
     /// Creates a model.
     ///
@@ -84,7 +84,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     ///     It can't detect part of a key, such as a masked copy,
     ///     or a key in another encoding, such as Base64.
     ///   - maximumBatchSize: The maximum number of texts in one request.
-    ///   - session: The URL session that sends the requests.
+    ///   - transport: How the model sends its requests: by default ``makeDefaultTransport()``.
     public init(
         baseURL: URL,
         model: String,
@@ -94,7 +94,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
         revision: String? = nil,
         apiKey: String? = nil,
         maximumBatchSize: Int = 64,
-        session: URLSession = .shared
+        transport: any HTTPTransport = makeDefaultTransport()
     ) {
         precondition(dimension > 0, "The dimension must be greater than zero.")
         precondition(maximumBatchSize > 0, "The batch size must be greater than zero.")
@@ -106,7 +106,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
         self.revision = revision
         self.apiKey = apiKey.map(APIKey.init)
         self.maximumBatchSize = maximumBatchSize
-        self.session = session
+        self.transport = transport
         self.identifier = Identifier.make(
             engine: "openai",
             model: model,
@@ -120,9 +120,11 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     ///
     /// A batch larger than ``maximumBatchSize`` becomes several requests, one after another.
     ///
-    /// - Throws: ``EmbeddingError/httpStatus(_:message:)`` if the server rejects a request,
+    /// - Throws: ``HTTPTransportError`` if the server rejects a request,
     ///   for example because a text is too long,
-    ///   or another ``EmbeddingError`` or a `URLError`.
+    ///   or if the model can't read the response;
+    ///   another ``EmbeddingError``;
+    ///   or the transport's error if a request fails on the way or is cancelled.
     public func embed(_ texts: [String], for purpose: EmbeddingPurpose) async throws -> [[Float]] {
         try Vectors.validate(texts)
         var vectors: [[Float]] = []
@@ -144,18 +146,39 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     static let withheldMessage =
         "The server's response was withheld because it might contain the API key."
 
-    /// Returns `text`, or ``withheldMessage`` if the response might disclose the API key.
+    /// Returns `error`, or an error without the server's text
+    /// if anything that `error` keeps might disclose the API key.
     ///
     /// A server can echo the credential that it rejected,
     /// and text from a server reaches errors, and errors reach logs.
-    /// The check covers the whole response,
-    /// so a key outside the error message also withholds the text.
+    /// The check covers the whole body,
+    /// the status's reason phrase, every header,
+    /// and the description of the underlying error,
+    /// so a key anywhere in the response withholds all of the server's text.
+    /// The error that replaces it keeps the kind and the status code,
+    /// and its body is ``withheldMessage``.
     /// ``CredentialScreen`` describes what it can't detect.
-    private func screened(_ text: String, response body: Data) -> String {
-        guard let apiKey else { return text }
-        let screen = CredentialScreen(credential: apiKey.value)
-        return screen.isClear(Array(body)) && screen.isClear(Array(text.utf8))
-            ? text : Self.withheldMessage
+    static func screened(_ error: HTTPTransportError, with screen: CredentialScreen?) -> HTTPTransportError {
+        guard let screen else { return error }
+        var texts: [[UInt8]] = []
+        if let body = error.body { texts.append(Array(body)) }
+        if let response = error.response {
+            texts.append(Array(response.status.reasonPhrase.utf8))
+            for field in response.headerFields {
+                texts.append(Array(field.name.rawName.utf8))
+                texts.append(Array(field.value.utf8))
+            }
+        }
+        if let underlying = error.underlyingError {
+            texts.append(Array(String(describing: underlying).utf8))
+            texts.append(Array(String(reflecting: underlying).utf8))
+        }
+        guard !texts.allSatisfy(screen.isClear) else { return error }
+        return HTTPTransportError(
+            kind: error.kind,
+            response: error.response.map { HTTPResponse(status: .init(code: $0.status.code)) },
+            body: Data(withheldMessage.utf8)
+        )
     }
 
     /// An API key that doesn't appear when the model is printed or dumped.
@@ -189,41 +212,36 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
         var data: [Item]
     }
 
-    private struct ErrorResponse: Decodable {
-        struct Detail: Decodable { var message: String }
-        var error: Detail
-    }
-
     /// Sends one request and returns the vectors in the order of `inputs`.
     private func request(_ inputs: [String]) async throws -> [[Float]] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("embeddings"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var fields = HTTPFields()
         if let apiKey {
-            request.setValue("Bearer \(apiKey.value)", forHTTPHeaderField: "Authorization")
+            fields[.authorization] = "Bearer \(apiKey.value)"
         }
-        request.httpBody = try JSONEncoder().encode(
+        let request = HTTPRequest(
+            method: .post,
+            url: baseURL.appendingPathComponent("embeddings"),
+            headerFields: fields
+        )
+        let body = try JSONEncoder().encode(
             Request(model: model, input: inputs, dimensions: requestsDimension ? dimension : nil)
         )
+        let screen = apiKey.map { CredentialScreen(credential: $0.value) }
 
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw EmbeddingError.invalidResponse("The response isn't an HTTP response.")
+        let data: Data
+        do {
+            data = try await transport.fetch(request, body: body)
+        } catch let error as HTTPTransportError {
+            throw Self.screened(error, with: screen)
         }
-        guard (200 ..< 300).contains(http.statusCode) else {
-            let message =
-                (try? JSONDecoder().decode(ErrorResponse.self, from: data).error.message)
-                ?? String(decoding: data, as: UTF8.self)
-            throw EmbeddingError.httpStatus(http.statusCode, message: screened(message, response: data))
-        }
-
         let decoded: Response
         do {
             decoded = try JSONDecoder().decode(Response.self, from: data)
         } catch {
             // A decoding error can quote a value from the response.
-            throw EmbeddingError.invalidResponse(
-                screened(String(describing: error), response: data)
+            throw Self.screened(
+                HTTPTransportError(kind: .decodingError, body: data, underlyingError: error),
+                with: screen
             )
         }
         guard decoded.data.count == inputs.count else {

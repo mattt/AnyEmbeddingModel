@@ -82,13 +82,33 @@
             }
         }
 
-        @Test("Reports the server's error message")
+        /// The parts of an ``HTTPTransportError`` that the tests compare.
+        private struct Failure: Equatable {
+            var kind: HTTPTransportError.Kind
+            var status: Int?
+            var body: String?
+        }
+
+        /// Returns the parts of `error` that the tests compare,
+        /// or `nil` if it isn't an ``HTTPTransportError``.
+        private func failure(_ error: (any Error)?) -> Failure? {
+            guard let error = error as? HTTPTransportError else { return nil }
+            return Failure(
+                kind: error.kind,
+                status: error.response?.status.code,
+                body: error.body.map { String(decoding: $0, as: UTF8.self) }
+            )
+        }
+
+        @Test("Reports the server's error status and body")
         func serverError() async throws {
             try await withServer(.error(status: 413, message: "Input is too long.")) { _, url in
                 let model = OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3)
-                await #expect(throws: EmbeddingError.httpStatus(413, message: "Input is too long.")) {
-                    try await model.embed(["a"], for: .document)
-                }
+                let (error, _) = await errorText(model)
+                let failure = try #require(failure(error))
+                #expect(failure.kind == .httpError)
+                #expect(failure.status == 413)
+                #expect(failure.body?.contains("Input is too long.") == true)
             }
         }
 
@@ -104,7 +124,9 @@
                 _ = try await model.embed(["a"], for: .document)
                 return (nil, "")
             } catch {
-                return (error, "\(error) \(String(reflecting: error)) \(error.localizedDescription)")
+                var dumped = ""
+                dump(error, to: &dumped)
+                return (error, "\(error) \(String(reflecting: error)) \(error.localizedDescription) \(dumped)")
             }
         }
 
@@ -115,7 +137,7 @@
             let message = "Bad key \(Self.key). Rejected \(Self.key)."
             try await withServer(.error(status: 401, message: message)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(error as? EmbeddingError == .httpStatus(401, message: Self.withheld))
+                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!text.contains(Self.key))
             }
         }
@@ -125,7 +147,7 @@
             let body = "\(Self.key) is invalid: \(Self.key)"
             try await withServer(.text(status: 403, body: body)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(error as? EmbeddingError == .httpStatus(403, message: Self.withheld))
+                #expect(failure(error) == Failure(kind: .httpError, status: 403, body: Self.withheld))
                 #expect(!text.contains(Self.key))
             }
         }
@@ -148,7 +170,7 @@
         func withholdsEncodedForms(body: String) async throws {
             try await withServer(.text(status: 401, body: body)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(error as? EmbeddingError == .httpStatus(401, message: Self.withheld))
+                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!text.lowercased().contains("secret/one"))
                 #expect(!text.contains("%2"))
             }
@@ -161,7 +183,8 @@
                 let body = #"{"data": "\#(value)"}"#
                 try await withServer(.text(status: 200, body: body)) { _, url in
                     let (error, text) = await errorText(model(url))
-                    #expect(error as? EmbeddingError == .invalidResponse(Self.withheld))
+                    #expect(failure(error) == Failure(kind: .decodingError, body: Self.withheld))
+                    #expect((error as? HTTPTransportError)?.underlyingError == nil)
                     #expect(!text.contains(value))
                 }
             }
@@ -172,16 +195,24 @@
             try await withServer(.text(status: 503, body: "Overloaded: 100% of capacity")) { _, url in
                 let (error, _) = await errorText(model(url))
                 #expect(
-                    error as? EmbeddingError == .httpStatus(503, message: "Overloaded: 100% of capacity")
+                    failure(error) == Failure(kind: .httpError, status: 503, body: "Overloaded: 100% of capacity")
                 )
             }
             try await withServer(.text(status: 200, body: #"{"data": "nope"}"#)) { _, url in
                 let (error, _) = await errorText(model(url))
-                guard case .invalidResponse(let message) = error as? EmbeddingError else {
-                    Issue.record("Expected an invalid response, got \(String(describing: error)).")
-                    return
-                }
-                #expect(message != Self.withheld)
+                #expect(failure(error) == Failure(kind: .decodingError, body: #"{"data": "nope"}"#))
+                #expect((error as? HTTPTransportError)?.underlyingError is DecodingError)
+            }
+        }
+
+        @Test("Withholds the server's text when a header contains the key")
+        func withholdsHeader() async throws {
+            let headers = ["WWW-Authenticate": #"Bearer error="invalid", key="sk-secret/one+two""#]
+            try await withServer(.text(status: 401, body: "denied", headers: headers)) { _, url in
+                let (error, text) = await errorText(model(url))
+                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect((error as? HTTPTransportError)?.response?.headerFields.isEmpty == true)
+                #expect(!text.contains(Self.key))
             }
         }
 
@@ -189,7 +220,9 @@
         func noKeyNoRedaction() async throws {
             try await withServer(.text(status: 500, body: "sk-secret/one+two broke")) { _, url in
                 let (error, _) = await errorText(model(url, apiKey: nil))
-                #expect(error as? EmbeddingError == .httpStatus(500, message: "sk-secret/one+two broke"))
+                #expect(
+                    failure(error) == Failure(kind: .httpError, status: 500, body: "sk-secret/one+two broke")
+                )
             }
         }
 
