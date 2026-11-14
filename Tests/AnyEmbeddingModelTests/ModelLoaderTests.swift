@@ -28,16 +28,26 @@
             var description: String { "stub failure" }
         }
 
-        private let continuations = TestLock<[CheckedContinuation<Int, any Error>?]>([])
+        private struct State {
+            var continuations: [CheckedContinuation<Int, any Error>?] = []
+            /// Whether the test has ended, so that a load fails as soon as it starts.
+            var isFinished = false
+        }
+
+        private let state = TestLock(State())
 
         /// Each load's value is its position, starting at 0.
         func load() async throws -> Int {
             try await withCheckedThrowingContinuation { continuation in
-                continuations.withLock { $0.append(continuation) }
+                let isFinished = state.withLock { state in
+                    state.continuations.append(state.isFinished ? nil : continuation)
+                    return state.isFinished
+                }
+                if isFinished { continuation.resume(throwing: Failure()) }
             }
         }
 
-        var started: Int { continuations.withLock { $0.count } }
+        var started: Int { state.withLock { $0.continuations.count } }
 
         func waitForStart(_ count: Int) async throws {
             try await waitUntil("load \(count) to start") { started >= count }
@@ -51,11 +61,13 @@
             take(index)?.resume(throwing: Failure())
         }
 
-        /// Ends every load that a test left running, so that no task waits forever.
+        /// Ends every load that a test left running, and every load that starts later,
+        /// so that no task waits forever.
         func completeRemaining() {
-            let remaining = continuations.withLock { continuations in
-                defer { continuations = continuations.map { _ in nil } }
-                return continuations.compactMap { $0 }
+            let remaining = state.withLock { state in
+                state.isFinished = true
+                defer { state.continuations = state.continuations.map { _ in nil } }
+                return state.continuations.compactMap { $0 }
             }
             for continuation in remaining {
                 continuation.resume(throwing: Failure())
@@ -63,9 +75,9 @@
         }
 
         private func take(_ index: Int) -> CheckedContinuation<Int, any Error>? {
-            continuations.withLock { continuations in
-                defer { continuations[index] = nil }
-                return continuations[index]
+            state.withLock { state in
+                defer { state.continuations[index] = nil }
+                return state.continuations[index]
             }
         }
     }
@@ -141,13 +153,20 @@
             }
         }
 
+        @Test("A load that starts after cleanup ends at once")
+        func loadAfterCleanup() async throws {
+            stub.completeRemaining()
+            #expect(try await Caller(loader).failed())
+            #expect(stub.started == 1)
+        }
+
         @Test("A loaded value is reused")
         func reuse() async throws {
             try await run {
                 let first = try await join(1)
                 stub.succeed(0)
                 _ = try await first[0].value()
-                #expect(try await loader.container() == 0)
+                #expect(try await Caller(loader).value() == 0)
                 #expect(stub.started == 1)
             }
         }
@@ -199,7 +218,7 @@
 
                 stub.succeed(0)
                 #expect(try await abandoned[0].value() == 0)
-                #expect(try await loader.container() == 1)
+                #expect(try await Caller(loader).value() == 1)
                 #expect(stub.started == 2)
             }
         }
