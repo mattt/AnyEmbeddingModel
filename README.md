@@ -31,7 +31,7 @@ Three backends are available:
 ## Requirements
 
 - Swift 6.3+ (Xcode 26.4+)
-- macOS 14, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
+- macOS 14, Mac Catalyst 17, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
 - For MLX, Apple silicon and the Metal toolchain; watchOS is not supported.
 
 ## Installation
