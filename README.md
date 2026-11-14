@@ -260,5 +260,5 @@ with pinned package versions.
 
 ## License
 
-AnyEmbeddingModel is available under the MIT license.
+AnyEmbeddingModel is available under the Apache License 2.0.
 See [LICENSE](LICENSE) for details.
