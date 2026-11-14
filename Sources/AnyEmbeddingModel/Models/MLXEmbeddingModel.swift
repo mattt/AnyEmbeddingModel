@@ -390,11 +390,14 @@
                 settings: [prefixes.query, prefixes.document, String(maximumTokenCount), "pool-v2"]
             )
             // A local version is part of the key,
-            // so that a new version of a directory loads its new files.
+            // so that a new version of a directory loads its new files,
+            // and so is an explicit Hub client,
+            // so that a model loads with the client that it was given.
             let key = ModelLoaderKey(
                 source: directory == nil ? .hub : .directory,
                 location: directory?.path ?? modelId,
-                version: revision
+                version: revision,
+                client: hub.map(ObjectIdentifier.init)
             )
             self.loaderKey = key
             self.loader = LoaderRegistry.loader(for: key) {

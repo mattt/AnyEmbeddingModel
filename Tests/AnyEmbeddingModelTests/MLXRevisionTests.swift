@@ -18,8 +18,13 @@
             let server = try MockEmbeddingServer(behavior: behavior)
             let url = try await server.start()
             defer { server.stop() }
+            // A download needs a cache, so each client has an empty one of its own.
+            let manager = FileManager.default
+            let cache = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try manager.createDirectory(at: cache, withIntermediateDirectories: true)
+            defer { try? manager.removeItem(at: cache) }
             // The server's base URL ends in /v1, which a Hub host doesn't have.
-            let hub = HubClient(host: url.deletingLastPathComponent(), cache: nil)
+            let hub = HubClient(host: url.deletingLastPathComponent(), cache: HubCache(cacheDirectory: cache))
             try await body(server, hub)
         }
 
@@ -186,6 +191,48 @@
                 dimension: 3
             )
             #expect(local.hub == nil)
+        }
+
+        @Test("Models with different Hub clients don't share a loader")
+        func hubClientKeys() throws {
+            let host = URL(string: "http://127.0.0.1:9")!
+            let first = HubClient(host: host, cache: nil)
+            let second = HubClient(host: host, cache: nil)
+            let a = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3, hub: first)
+            let b = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3, hub: second)
+            let c = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3, hub: first)
+            let d = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3)
+            #expect(a.loaderKey != b.loaderKey)
+            #expect(a.loaderKey == c.loaderKey)
+            #expect(a.loaderKey != d.loaderKey)
+            #expect(a.identifier == b.identifier)
+        }
+
+        @Test("A model with a working client retries with it after another client failed", .needsMetalLibrary)
+        func hubClientRetry() async throws {
+            try await withHub(.text(status: 503, body: "down")) { failing, failingHub in
+                try await withHub(.text(status: 404, body: "missing")) { working, workingHub in
+                    let commit = String(repeating: "c", count: 40)
+                    let a = try MLXEmbeddingModel(modelId: "org/model", commit: commit, dimension: 3, hub: failingHub)
+                    let b = try MLXEmbeddingModel(modelId: "org/model", commit: commit, dimension: 3, hub: workingHub)
+                    try await removingFromCache(a, b) {
+                        await #expect(throws: (any Error).self) { try await a.prewarm() }
+                        #expect(isFailed(a))
+                        let failingRequests = failing.requests.count
+                        #expect(failingRequests > 0)
+
+                        // The replacement model uses its own client, not the one that failed.
+                        #expect(b.availability == .unavailable(.notLoaded))
+                        await #expect(throws: (any Error).self) { try await b.prewarm() }
+                        #expect(!working.requests.isEmpty)
+                        #expect(failing.requests.count == failingRequests)
+
+                        // A retry of the first model uses its own client again.
+                        await #expect(throws: (any Error).self) { try await a.prewarm() }
+                        #expect(failing.requests.count > failingRequests)
+                    }
+                }
+            }
         }
 
         @Test("Resolving a commit hash makes no request")

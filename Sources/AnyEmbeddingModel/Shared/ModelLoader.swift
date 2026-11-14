@@ -25,10 +25,20 @@ struct ModelLoaderKey: Hashable, Sendable {
     /// The UTF-8 bytes of the commit of a hub model, or of the version of a directory.
     let version: [UInt8]
 
-    init(source: Source, location: String, version: String) {
+    /// The client that downloads a hub model, if the caller supplied one.
+    ///
+    /// A model with its own client loads with that client,
+    /// so it doesn't share a loader with a model that uses another client,
+    /// which could fail where its own client wouldn't.
+    /// The loader holds the client for as long as the process runs,
+    /// so no other client can receive the same identifier.
+    let client: ObjectIdentifier?
+
+    init(source: Source, location: String, version: String, client: ObjectIdentifier? = nil) {
         self.source = source
         self.location = Array(location.utf8)
         self.version = Array(version.utf8)
+        self.client = client
     }
 }
 
