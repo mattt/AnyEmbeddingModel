@@ -187,18 +187,20 @@
         @Test("A response with no commit is an error")
         func noCommit() async throws {
             try await withHub(.json(#"{"id": "org/model"}"#)) { _, hub in
-                await #expect(throws: EmbeddingError.self) {
+                let error = await #expect(throws: EmbeddingError.self) {
                     try await MLXEmbeddingModel.resolving(modelId: "org/model", dimension: 3, hub: hub)
                 }
+                #expect(error?.kind == .invalidResponse)
             }
         }
 
         @Test("A repository without a namespace is rejected before any request")
         func badRepository() async throws {
             try await withHub(.json("{}")) { server, hub in
-                await #expect(throws: EmbeddingError.self) {
+                let error = await #expect(throws: EmbeddingError.self) {
                     try await MLXEmbeddingModel.resolving(modelId: "model", dimension: 3, hub: hub)
                 }
+                #expect(error?.kind == .unavailable)
                 #expect(server.requests.isEmpty)
             }
         }

@@ -74,7 +74,7 @@ public protocol EmbeddingModel: Sendable {
     ///   - purpose: Whether the texts are queries or documents.
     /// - Returns: One unit vector of ``dimension`` elements for each text,
     ///   in the order of `texts`.
-    /// - Throws: ``EmbeddingError/emptyText(index:)``
+    /// - Throws: ``EmbeddingError/Kind/emptyText``
     ///   if a text contains only whitespace,
     ///   or another ``EmbeddingError`` or an engine error if the model fails.
     ///   If the model can't embed one text, it throws and returns no vectors.

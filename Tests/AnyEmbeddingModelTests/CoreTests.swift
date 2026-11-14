@@ -178,6 +178,27 @@ struct CoreTests {
         }
     }
 
+    @Test("An error keeps its kind and typed diagnostics")
+    func errorDiagnostics() {
+        let count = EmbeddingError.wrongVectorCount(expected: 4, actual: 3)
+        #expect(count.kind == .wrongVectorCount)
+        #expect(count.expected == 4)
+        #expect(count.actual == 3)
+        #expect(count.index == nil)
+        #expect(count.description == "Wrong vector count: expected 4, got 3")
+
+        let empty = EmbeddingError.emptyText(index: 2)
+        #expect(empty.kind == .emptyText)
+        #expect(empty.index == 2)
+        #expect(empty.description == "Empty text at index 2")
+
+        let commit = EmbeddingError.invalidCommit("main")
+        #expect(commit.kind == .invalidCommit)
+        #expect(commit.message == "main")
+        #expect(commit != .invalidCommit("dev"))
+        #expect(EmbeddingError.Kind.invalidVector.description == "Invalid vector")
+    }
+
     @Test("Batches keep order and size")
     func batches() {
         let batches = Vectors.batches(Array(0 ..< 5), size: 2).map(Array.init)

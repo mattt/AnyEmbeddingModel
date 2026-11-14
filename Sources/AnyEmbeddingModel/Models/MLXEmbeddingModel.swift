@@ -120,13 +120,13 @@
         ///     To start from a branch or tag name,
         ///     call ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``.
         ///   - dimension: The number of elements in each vector.
-        ///     The first embedding throws ``EmbeddingError/dimensionMismatch(expected:actual:)``
+        ///     The first embedding throws ``EmbeddingError/Kind/dimensionMismatch``
         ///     if the model produces another size.
         ///   - prefixes: The text before each query and document.
         ///   - maximumTokenCount: The maximum number of tokens that the model reads from one text.
         ///   - maximumBatchSize: The maximum number of texts that the model runs at one time.
         ///   - hub: The client that downloads the model, or `nil` for the default client.
-        /// - Throws: ``EmbeddingError/invalidCommit(_:)``
+        /// - Throws: ``EmbeddingError/Kind/invalidCommit``
         ///   if `commit` isn't a full commit hash.
         public init(
             modelId: String,
@@ -217,8 +217,8 @@
         ///   - hub: The client that asks the Hub and downloads the model,
         ///     or `nil` for the default client.
         /// - Returns: A model pinned to the commit.
-        /// - Throws: ``EmbeddingError/invalidResponse(_:)`` if the Hub reports no commit,
-        ///   ``EmbeddingError/unavailable(_:)`` if `modelId` isn't of the form `namespace/name`,
+        /// - Throws: ``EmbeddingError/Kind/invalidResponse`` if the Hub reports no commit,
+        ///   ``EmbeddingError/Kind/unavailable`` if `modelId` isn't of the form `namespace/name`,
         ///   or an error from the Hub client if the request fails.
         public static func resolving(
             modelId: String,
@@ -406,7 +406,7 @@
 
         /// Downloads and loads the model, and checks its ``dimension``.
         ///
-        /// - Throws: ``EmbeddingError/dimensionMismatch(expected:actual:)``
+        /// - Throws: ``EmbeddingError/Kind/dimensionMismatch``
         ///   if the model produces vectors of another size than ``dimension``.
         public func prewarm() async throws {
             _ = try await embed(["dimension check"], for: .document)

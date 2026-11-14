@@ -1,6 +1,6 @@
 /// Operations that every engine uses on its inputs and outputs.
 enum Vectors {
-    /// Throws ``EmbeddingError/emptyText(index:)``
+    /// Throws ``EmbeddingError/Kind/emptyText``
     /// for the first text that contains only whitespace.
     static func validate(_ texts: [String]) throws(EmbeddingError) {
         for (index, text) in texts.enumerated()
@@ -11,9 +11,9 @@ enum Vectors {
 
     /// Returns `vector` scaled to unit length.
     ///
-    /// - Throws: ``EmbeddingError/dimensionMismatch(expected:actual:)``
+    /// - Throws: ``EmbeddingError/Kind/dimensionMismatch``
     ///   if the vector doesn't have `dimension` elements,
-    ///   or ``EmbeddingError/invalidVector(index:)``
+    ///   or ``EmbeddingError/Kind/invalidVector``
     ///   if it has zero length or a value that isn't finite.
     static func normalized(
         _ vector: [Float],
