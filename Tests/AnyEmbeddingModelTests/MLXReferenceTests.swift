@@ -15,7 +15,7 @@
     var embeddingPurpose: EmbeddingPurpose { purpose == "query" ? .query : .document }
   }
 
-  /// The contents of one file that `scripts/generate-reference-fixtures.py` wrote.
+  /// The contents of one file that `mise run generate:fixtures` wrote.
   private struct ReferenceFixture: Decodable, Sendable {
     let presetModel: String
     let presetCommit: String

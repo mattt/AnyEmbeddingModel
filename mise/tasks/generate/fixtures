@@ -1,3 +1,5 @@
+#!/usr/bin/env -S uv run --script
+#MISE description="Regenerate the sentence-transformers reference vectors"
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -18,7 +20,7 @@ It runs on the CPU and downloads each model from the Hugging Face Hub.
 For Nomic, it runs that repository's remote code at a pinned commit.
 
 Usage, from the package directory:
-    uv run scripts/generate-reference-fixtures.py
+    mise run generate:fixtures
 """
 
 import importlib.metadata

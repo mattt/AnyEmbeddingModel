@@ -240,7 +240,7 @@
       #expect(a.identifier.hasPrefix("openai/m/-/3/"))
     }
 
-    /// The expected values come from `scripts/generate-identifier-goldens.py`.
+    /// The expected values come from `mise run generate:goldens`.
     @Test("Identifiers match the independent implementation")
     func identifierGoldens() {
       let url = URL(string: "http://a.example/v1")!
