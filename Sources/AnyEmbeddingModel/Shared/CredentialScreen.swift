@@ -8,11 +8,15 @@ import Foundation
 /// It decodes the text instead:
 /// JSON escapes, including `\uXXXX`, and percent-encoding in either case,
 /// repeatedly, for text that is encoded more than once.
-/// After each pass, it looks for the credential in the bytes,
-/// ignoring ASCII case and allowing composed and decomposed Unicode forms.
+/// Before decoding and after each decoding stage,
+/// it looks for the credential in the text,
+/// so a form that one stage produces and the next stage changes is still checked.
+/// It compares the text in its composed and its decomposed Unicode forms,
+/// ignoring ASCII case,
+/// so a credential echoed with some characters composed and others decomposed is found.
 ///
 /// The text isn't clear if the credential appears,
-/// if the text isn't valid UTF-8,
+/// if the text or the result of a decoding stage isn't valid UTF-8,
 /// or if decoding doesn't finish within ``maximumPasses``.
 ///
 /// The screen can't detect:
@@ -40,20 +44,34 @@ struct CredentialScreen: Sendable {
     /// Returns whether `bytes` can be shown without disclosing the credential,
     /// as far as the screen can detect.
     func isClear(_ bytes: [UInt8]) -> Bool {
-        guard String(bytes: bytes, encoding: .utf8) != nil else { return false }
         var current = bytes
+        guard !discloses(current) else { return false }
         for _ in 0 ..< Self.maximumPasses {
-            if discloses(current) { return false }
-            let next = Self.decodingJSONEscapes(Self.decodingPercentEscapes(current))
+            let percentDecoded = Self.decodingPercentEscapes(current)
+            guard !discloses(percentDecoded) else { return false }
+            let next = Self.decodingJSONEscapes(percentDecoded)
+            guard !discloses(next) else { return false }
             if next == current { return true }
             current = next
         }
         return false
     }
 
+    /// Returns whether `bytes` might disclose the credential:
+    /// whether they aren't valid UTF-8,
+    /// or contain the credential in any of the forms that the screen compares.
     private func discloses(_ bytes: [UInt8]) -> Bool {
-        let haystack = Self.folded(bytes)
-        return needles.contains { needle in
+        guard let text = String(bytes: bytes, encoding: .utf8) else { return true }
+        let haystacks = Set([
+            bytes,
+            Array(text.precomposedStringWithCanonicalMapping.utf8),
+            Array(text.decomposedStringWithCanonicalMapping.utf8),
+        ])
+        return haystacks.contains { contains(Self.folded($0)) }
+    }
+
+    private func contains(_ haystack: [UInt8]) -> Bool {
+        needles.contains { needle in
             guard haystack.count >= needle.count else { return false }
             return (0 ... (haystack.count - needle.count)).contains { start in
                 haystack[start ..< (start + needle.count)].elementsEqual(needle)

@@ -73,4 +73,32 @@ struct CredentialScreenTests {
         let decomposed = CredentialScreen(credential: "cle\u{301}")
         #expect(!decomposed.isClear(Array("the cl\u{E9} here".utf8)))
     }
+
+    @Test("A form that one decoding stage produces is checked before the next stage changes it")
+    func checksEachStage() {
+        // The credential has a literal backslash and `n`.
+        let screen = CredentialScreen(credential: #"sk-\n"#)
+        // Percent decoding gives the credential, and JSON decoding would turn it into a newline.
+        #expect(!screen.isClear(Array("sk-%5Cn".utf8)))
+        #expect(!screen.isClear(Array("sk-%5cn".utf8)))
+        // JSON decoding gives the credential, and percent decoding in the next pass would change it.
+        let percent = CredentialScreen(credential: "sk-%41")
+        #expect(!percent.isClear(Array(#"sk-\u002541"#.utf8)))
+    }
+
+    @Test("A stage that produces text that isn't valid UTF-8 isn't clear")
+    func invalidUTF8AfterDecoding() {
+        #expect(!screen.isClear(Array("bad %FF byte".utf8)))
+        #expect(!screen.isClear(Array("bad %C3 byte".utf8)))
+    }
+
+    @Test("A credential echoed with mixed composed and decomposed characters is found")
+    func mixedUnicodeForms() {
+        let screen = CredentialScreen(credential: "k\u{E9}y-\u{E9}t\u{E9}")
+        #expect(!screen.isClear(Array("echo k\u{E9}y-\u{E9}te\u{301} end".utf8)))
+        #expect(!screen.isClear(Array("echo ke\u{301}y-\u{E9}t\u{E9} end".utf8)))
+        // The decomposed character can also arrive percent-encoded.
+        #expect(!screen.isClear(Array("echo k%C3%A9y-%C3%A9te%CC%81 end".utf8)))
+        #expect(screen.isClear(Array("echo key-ete end".utf8)))
+    }
 }
