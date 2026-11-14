@@ -165,6 +165,15 @@ Call `removeFromCache()` to release a model's weights,
 or `MLXEmbeddingModel.removeAllFromCache()` to release every model's weights.
 The next embedding loads them again.
 
+While a model loads or embeds,
+MLX keeps freed GPU buffers in a cache for reuse, up to a limit.
+Pass `gpuMemory:` to set the limits for active and idle periods.
+The default, `.automatic`, scales the active limit with the device's memory
+and keeps the idle limit small;
+`.unconstrained` leaves the cache effectively unlimited.
+`removeFromCache()` also clears the cache when no model is loading or embedding,
+unless the configuration says not to.
+
 To load files from disk, use `init(directory:name:version:dimension:)`.
 Change `version` whenever the files change,
 and do not change files while that version is in use.
@@ -263,6 +272,8 @@ beside the test binary as `mlx.metallib`, where the test process can find it.
 It removes the copy after the run
 so that it does not invalidate the test bundle's signature on the next build.
 The task stops with an error if the toolchain cannot produce the library.
+Tests that start MLX's Metal device run only in this task,
+because MLX stops a process that cannot find the library.
 
 The real-model tests download model files as needed.
 One test also asks the Hub whether each preset's commit exists.

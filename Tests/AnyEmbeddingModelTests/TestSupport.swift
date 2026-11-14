@@ -18,6 +18,21 @@
         }
     }
 
+    extension Trait where Self == ConditionTrait {
+        /// Runs a test only if `ANY_EMBEDDING_MODEL_TEST_METAL` is set.
+        ///
+        /// Loading a model or setting MLX's cache limit starts MLX's Metal device,
+        /// which stops the process if it can't find MLX's Metal library.
+        /// The `test:mlx` task puts the library where the test process finds it
+        /// and sets the variable.
+        static var needsMetalLibrary: Self {
+            .enabled(
+                if: ProcessInfo.processInfo.environment["ANY_EMBEDDING_MODEL_TEST_METAL"] != nil,
+                "Run `mise run test:mlx`, which puts MLX's Metal library where the tests find it."
+            )
+        }
+    }
+
     /// Runs `body`, then removes each model from the cache, even if `body` throws.
     func removingFromCache<Result>(
         _ models: MLXEmbeddingModel...,

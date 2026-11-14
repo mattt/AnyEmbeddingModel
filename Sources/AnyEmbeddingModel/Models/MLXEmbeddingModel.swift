@@ -41,12 +41,12 @@
     /// So every model has an exact version before it exists:
     ///
     /// - The presets, such as ``bgeSmallEnglish``, pin a commit.
-    /// - ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
+    /// - ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``
     ///   takes a full commit hash and throws for anything else.
-    /// - ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
+    /// - ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``
     ///   asks the Hub which commit a branch or tag names now,
     ///   and returns a model pinned to that commit.
-    /// - ``init(directory:name:version:dimension:prefixes:maximumTokenCount:maximumBatchSize:)``
+    /// - ``init(directory:name:version:dimension:prefixes:maximumTokenCount:maximumBatchSize:gpuMemory:)``
     ///   takes a version that you choose for files on disk.
     public struct MLXEmbeddingModel: EmbeddingModel {
         /// The reason that the model can't embed text now.
@@ -60,6 +60,60 @@
             case failedToLoad(String)
         }
 
+        /// Limits on the cache of GPU buffers that MLX keeps for reuse,
+        /// while a model loads or embeds and while no model does.
+        ///
+        /// This type has the same shape as `MLXLanguageModel.GPUMemoryConfiguration`
+        /// in AnyLanguageModel.
+        public struct GPUMemoryConfiguration: Sendable, Hashable {
+            /// The cache limit, in bytes, while at least one model loads or embeds.
+            public var activeCacheLimit: Int
+
+            /// The cache limit, in bytes, while no model loads or embeds.
+            public var idleCacheLimit: Int
+
+            /// Whether removing a model from the cache also clears MLX's cached GPU buffers,
+            /// when no model is loading or embedding.
+            public var clearCacheOnEviction: Bool
+
+            /// Creates a configuration.
+            ///
+            /// - Parameters:
+            ///   - activeCacheLimit: The cache limit, in bytes, while a model loads or embeds.
+            ///   - idleCacheLimit: The cache limit, in bytes, while no model loads or embeds.
+            ///   - clearCacheOnEviction: Whether removing a model from the cache
+            ///     also clears MLX's cached GPU buffers.
+            public init(
+                activeCacheLimit: Int,
+                idleCacheLimit: Int,
+                clearCacheOnEviction: Bool = true
+            ) {
+                self.activeCacheLimit = activeCacheLimit
+                self.idleCacheLimit = idleCacheLimit
+                self.clearCacheOnEviction = clearCacheOnEviction
+            }
+
+            /// A configuration that scales the active limit with the device's memory
+            /// and keeps the idle limit small, to reduce memory pressure in the background.
+            public static var automatic: GPUMemoryConfiguration {
+                let gigabytes = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+                let active: Int
+                switch gigabytes {
+                case ..<4: active = 128_000_000
+                case ..<6: active = 256_000_000
+                case ..<8: active = 512_000_000
+                default: active = 768_000_000
+                }
+                return .init(activeCacheLimit: active, idleCacheLimit: 50_000_000, clearCacheOnEviction: true)
+            }
+
+            /// A configuration that leaves the cache effectively unlimited,
+            /// for an app that prefers reusing buffers to reclaiming memory.
+            public static var unconstrained: GPUMemoryConfiguration {
+                .init(activeCacheLimit: Int.max, idleCacheLimit: Int.max, clearCacheOnEviction: false)
+            }
+        }
+
         /// The repository of the model on the Hugging Face Hub,
         /// such as `"BAAI/bge-small-en-v1.5"`.
         public let modelId: String
@@ -68,9 +122,9 @@
         /// a full commit hash for a model from the Hub,
         /// or the version that you chose for a model in a local directory.
         ///
-        /// After ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``,
+        /// After ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``,
         /// save this value and pass it to
-        /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
+        /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``
         /// to skip the branch lookup next time.
         /// Loading the model still requires its files.
         public let revision: String
@@ -107,6 +161,11 @@
         /// and a fingerprint of ``prefixes`` and ``maximumTokenCount``.
         public let identifier: String
 
+        /// The limits on MLX's cache of GPU buffers while this model loads or embeds.
+        ///
+        /// It doesn't change the vectors, so it isn't part of ``identifier``.
+        public let gpuMemory: GPUMemoryConfiguration
+
         /// The key of the loader that this model shares with its copies.
         let loaderKey: ModelLoaderKey
 
@@ -118,7 +177,7 @@
         ///   - modelId: The repository of the model on the Hugging Face Hub.
         ///   - commit: The full 40-character commit hash.
         ///     To start from a branch or tag name,
-        ///     call ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``.
+        ///     call ``resolving(modelId:revision:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``.
         ///   - dimension: The number of elements in each vector.
         ///     The first embedding throws ``EmbeddingError/Kind/dimensionMismatch``
         ///     if the model produces another size.
@@ -126,6 +185,7 @@
         ///   - maximumTokenCount: The maximum number of tokens that the model reads from one text.
         ///   - maximumBatchSize: The maximum number of texts that the model runs at one time.
         ///   - hub: The client that downloads the model, or `nil` for the default client.
+        ///   - gpuMemory: The limits on MLX's cache of GPU buffers.
         /// - Throws: ``EmbeddingError/Kind/invalidCommit``
         ///   if `commit` isn't a full commit hash.
         public init(
@@ -135,7 +195,8 @@
             prefixes: EmbeddingPrefixes = .none,
             maximumTokenCount: Int = 512,
             maximumBatchSize: Int = 32,
-            hub: HubClient? = nil
+            hub: HubClient? = nil,
+            gpuMemory: GPUMemoryConfiguration = .automatic
         ) throws(EmbeddingError) {
             guard Self.isCommitHash(commit) else { throw .invalidCommit(commit) }
             self.init(
@@ -145,7 +206,8 @@
                 prefixes: prefixes,
                 maximumTokenCount: maximumTokenCount,
                 maximumBatchSize: maximumBatchSize,
-                hub: hub
+                hub: hub,
+                gpuMemory: gpuMemory
             )
         }
 
@@ -168,6 +230,7 @@
         ///   - prefixes: The text before each query and document.
         ///   - maximumTokenCount: The maximum number of tokens that the model reads from one text.
         ///   - maximumBatchSize: The maximum number of texts that the model runs at one time.
+        ///   - gpuMemory: The limits on MLX's cache of GPU buffers.
         public init(
             directory: URL,
             name: String,
@@ -175,7 +238,8 @@
             dimension: Int,
             prefixes: EmbeddingPrefixes = .none,
             maximumTokenCount: Int = 512,
-            maximumBatchSize: Int = 32
+            maximumBatchSize: Int = 32,
+            gpuMemory: GPUMemoryConfiguration = .automatic
         ) {
             precondition(!name.isEmpty, "The name must not be empty.")
             precondition(!version.isEmpty, "The version must not be empty.")
@@ -187,7 +251,8 @@
                 prefixes: prefixes,
                 maximumTokenCount: maximumTokenCount,
                 maximumBatchSize: maximumBatchSize,
-                hub: nil
+                hub: nil,
+                gpuMemory: gpuMemory
             )
         }
 
@@ -203,7 +268,7 @@
         ///
         /// This call needs the network unless `revision` is already a full commit hash.
         /// Save ``revision`` from the result and pass it to
-        /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:)``
+        /// ``init(modelId:commit:dimension:prefixes:maximumTokenCount:maximumBatchSize:hub:gpuMemory:)``
         /// to skip this lookup and keep the same vectors.
         /// Loading the model still requires its files.
         ///
@@ -216,6 +281,7 @@
         ///   - maximumBatchSize: The maximum number of texts that the model runs at one time.
         ///   - hub: The client that asks the Hub and downloads the model,
         ///     or `nil` for the default client.
+        ///   - gpuMemory: The limits on MLX's cache of GPU buffers.
         /// - Returns: A model pinned to the commit.
         /// - Throws: ``EmbeddingError/Kind/invalidResponse`` if the Hub reports no commit,
         ///   ``EmbeddingError/Kind/unavailable`` if `modelId` isn't of the form `namespace/name`,
@@ -227,7 +293,8 @@
             prefixes: EmbeddingPrefixes = .none,
             maximumTokenCount: Int = 512,
             maximumBatchSize: Int = 32,
-            hub: HubClient? = nil
+            hub: HubClient? = nil,
+            gpuMemory: GPUMemoryConfiguration = .automatic
         ) async throws -> MLXEmbeddingModel {
             let commit: String
             if isCommitHash(revision) {
@@ -251,7 +318,8 @@
                 prefixes: prefixes,
                 maximumTokenCount: maximumTokenCount,
                 maximumBatchSize: maximumBatchSize,
-                hub: hub
+                hub: hub,
+                gpuMemory: gpuMemory
             )
         }
 
@@ -269,7 +337,8 @@
             prefixes: EmbeddingPrefixes = .none,
             maximumTokenCount: Int = 512,
             maximumBatchSize: Int = 32,
-            hub: HubClient? = nil
+            hub: HubClient? = nil,
+            gpuMemory: GPUMemoryConfiguration = .automatic
         ) {
             self.init(
                 modelId: modelId,
@@ -279,7 +348,8 @@
                 prefixes: prefixes,
                 maximumTokenCount: maximumTokenCount,
                 maximumBatchSize: maximumBatchSize,
-                hub: hub
+                hub: hub,
+                gpuMemory: gpuMemory
             )
         }
 
@@ -291,7 +361,8 @@
             prefixes: EmbeddingPrefixes,
             maximumTokenCount: Int,
             maximumBatchSize: Int,
-            hub: HubClient?
+            hub: HubClient?,
+            gpuMemory: GPUMemoryConfiguration
         ) {
             precondition(dimension > 0, "The dimension must be greater than zero.")
             precondition(maximumTokenCount > 1, "The token count must be greater than one.")
@@ -303,6 +374,7 @@
             self.prefixes = prefixes
             self.maximumTokenCount = maximumTokenCount
             self.maximumBatchSize = maximumBatchSize
+            self.gpuMemory = gpuMemory
             self.identifier = Identifier.make(
                 engine: "mlx",
                 model: modelId,
@@ -415,7 +487,7 @@
         /// Returns the local directory of the model files,
         /// and downloads and loads the model if it isn't loaded.
         public func modelDirectory() async throws -> URL {
-            try await loader.container().modelDirectory
+            try await withGPUMemoryScope { try await loader.container().modelDirectory }
         }
 
         /// Removes this model's weights from the shared cache and cancels any load in progress.
@@ -427,6 +499,7 @@
         /// The next embedding loads the weights again.
         public func removeFromCache() async {
             loader.unload()
+            GPUMemoryManager.shared.evictIfSafe()
         }
 
         /// Removes the weights of every MLX embedding model from the shared cache
@@ -436,6 +509,7 @@
         /// and their next embedding loads the weights again.
         public static func removeAllFromCache() async {
             LoaderRegistry.unloadAll()
+            GPUMemoryManager.shared.evictIfSafe()
         }
 
         /// Returns a vector for each text, and loads the model if it isn't loaded.
@@ -444,24 +518,35 @@
         public func embed(_ texts: [String], for purpose: EmbeddingPurpose) async throws -> [[Float]] {
             try Vectors.validate(texts)
             guard !texts.isEmpty else { return [] }
-            let container = try await loader.container()
-            var vectors: [[Float]] = []
-            vectors.reserveCapacity(texts.count)
-            for batch in Vectors.batches(texts, size: maximumBatchSize) {
-                try Task.checkCancellation()
-                let inputs = batch.map { prefixes.apply(to: $0, for: purpose) }
-                let limit = maximumTokenCount
-                let batchVectors = try await container.perform { context in
-                    try Self.run(inputs, maximumTokenCount: limit, context: context)
+            return try await withGPUMemoryScope {
+                let container = try await loader.container()
+                var vectors: [[Float]] = []
+                vectors.reserveCapacity(texts.count)
+                for batch in Vectors.batches(texts, size: maximumBatchSize) {
+                    try Task.checkCancellation()
+                    let inputs = batch.map { prefixes.apply(to: $0, for: purpose) }
+                    let limit = maximumTokenCount
+                    let batchVectors = try await container.perform { context in
+                        try Self.run(inputs, maximumTokenCount: limit, context: context)
+                    }
+                    vectors += try Vectors.normalized(
+                        batchVectors,
+                        count: batch.count,
+                        dimension: dimension,
+                        firstIndex: batch.startIndex
+                    )
                 }
-                vectors += try Vectors.normalized(
-                    batchVectors,
-                    count: batch.count,
-                    dimension: dimension,
-                    firstIndex: batch.startIndex
-                )
+                return vectors
             }
-            return vectors
+        }
+
+        /// Runs `body` with this model's active cache limit,
+        /// and restores the idle limit when `body` returns, throws, or is cancelled,
+        /// unless another call is still active.
+        private func withGPUMemoryScope<Result>(_ body: () async throws -> Result) async throws -> Result {
+            let scope = GPUMemoryManager.shared.markActive(gpuMemory)
+            defer { GPUMemoryManager.shared.markIdle(scope: scope) }
+            return try await body()
         }
 
         /// Returns the token IDs that the model reads for each text,
@@ -470,7 +555,7 @@
             for texts: [String],
             purpose: EmbeddingPurpose
         ) async throws -> [[Int]] {
-            let container = try await loader.container()
+            let container = try await withGPUMemoryScope { try await loader.container() }
             let inputs = texts.map { prefixes.apply(to: $0, for: purpose) }
             let maximumTokenCount = maximumTokenCount
             return await container.perform { context in
@@ -591,6 +676,82 @@
             let all = loaders.withLock { Array($0.values) }
             for loader in all {
                 loader.unload()
+            }
+        }
+    }
+
+    /// Applies MLX's cache limit for the models that are loading or embedding now.
+    ///
+    /// Each call that loads or embeds marks a scope active, with its model's configuration,
+    /// and marks it idle when it ends.
+    /// While any scope is active, the limit is the largest active limit of the active scopes;
+    /// otherwise it's the largest idle limit of every configuration seen so far.
+    /// The manager sets the limit while it holds its lock,
+    /// so overlapping calls apply their limits in the order that they change the scopes.
+    ///
+    /// Setting a limit starts MLX's Metal device,
+    /// so the manager doesn't touch MLX until the first scope starts.
+    final class GPUMemoryManager: Sendable {
+        static let shared = GPUMemoryManager()
+
+        private struct State {
+            var knownConfigurations: Set<MLXEmbeddingModel.GPUMemoryConfiguration> = []
+            var activeScopes: [UInt64: MLXEmbeddingModel.GPUMemoryConfiguration] = [:]
+            var nextScope: UInt64 = 0
+            /// The limit that the manager set last, if it has started MLX's device.
+            var appliedLimit: Int?
+
+            mutating func apply(_ limit: Int) {
+                MLX.Memory.cacheLimit = limit
+                appliedLimit = limit
+            }
+
+            var activeLimit: Int {
+                activeScopes.values.map(\.activeCacheLimit).max() ?? idleLimit
+            }
+
+            var idlePolicy: MLXEmbeddingModel.GPUMemoryConfiguration {
+                knownConfigurations.max { $0.idleCacheLimit < $1.idleCacheLimit } ?? .automatic
+            }
+
+            var idleLimit: Int { idlePolicy.idleCacheLimit }
+        }
+
+        private let state = Locked(State())
+
+        /// The limit that the manager set last, or `nil` if it hasn't started MLX's device.
+        var appliedLimit: Int? { state.withLock { $0.appliedLimit } }
+
+        /// The number of calls that are loading or embedding now.
+        var activeScopeCount: Int { state.withLock { $0.activeScopes.count } }
+
+        func markActive(_ configuration: MLXEmbeddingModel.GPUMemoryConfiguration) -> UInt64 {
+            state.withLock { state in
+                state.knownConfigurations.insert(configuration)
+                state.nextScope &+= 1
+                let scope = state.nextScope
+                state.activeScopes[scope] = configuration
+                state.apply(state.activeLimit)
+                return scope
+            }
+        }
+
+        func markIdle(scope: UInt64) {
+            state.withLock { state in
+                state.activeScopes[scope] = nil
+                state.apply(state.activeScopes.isEmpty ? state.idleLimit : state.activeLimit)
+            }
+        }
+
+        /// Applies the idle limit, and clears the cache if the idle policy says to,
+        /// when no scope is active and MLX has started.
+        func evictIfSafe() {
+            state.withLock { state in
+                guard state.appliedLimit != nil, state.activeScopes.isEmpty else { return }
+                state.apply(state.idleLimit)
+                if state.idlePolicy.clearCacheOnEviction {
+                    MLX.Memory.clearCache()
+                }
             }
         }
     }

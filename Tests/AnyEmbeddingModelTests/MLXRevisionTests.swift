@@ -280,7 +280,7 @@
             #expect(a.loaderKey != b.loaderKey)
         }
 
-        @Test("Loading one model doesn't change a model whose path and version look alike")
+        @Test("Loading one model doesn't change a model whose path and version look alike", .needsMetalLibrary)
         func loaderStateIsSeparate() async throws {
             let base = "/nonexistent-\(UUID().uuidString)/a"
             let a = MLXEmbeddingModel(
@@ -326,7 +326,7 @@
             return false
         }
 
-        @Test("Removing a model from the cache applies to copies that already exist")
+        @Test("Removing a model from the cache applies to copies that already exist", .needsMetalLibrary)
         func removeFromCacheReachesCopies() async throws {
             let model = missingDirectoryModel()
             let copy = model
@@ -345,7 +345,7 @@
             #expect(copy.availability == .unavailable(.notLoaded))
         }
 
-        @Test("Removing every model from the cache applies to models that already exist")
+        @Test("Removing every model from the cache applies to models that already exist", .needsMetalLibrary)
         func removeAllFromCacheReachesModels() async throws {
             let first = missingDirectoryModel()
             let second = missingDirectoryModel()
@@ -372,6 +372,79 @@
             #expect(directory.loaderKey.location == hub.loaderKey.location)
             #expect(directory.loaderKey.version == hub.loaderKey.version)
             #expect(directory.loaderKey != hub.loaderKey)
+        }
+
+        @Test("GPU memory presets have the documented limits, and don't change the identifier")
+        func gpuMemoryPresets() {
+            let automatic = MLXEmbeddingModel.GPUMemoryConfiguration.automatic
+            #expect(automatic.idleCacheLimit == 50_000_000)
+            #expect([128_000_000, 256_000_000, 512_000_000, 768_000_000].contains(automatic.activeCacheLimit))
+            #expect(automatic.clearCacheOnEviction)
+            let unconstrained = MLXEmbeddingModel.GPUMemoryConfiguration.unconstrained
+            #expect(unconstrained.activeCacheLimit == .max)
+            #expect(unconstrained.idleCacheLimit == .max)
+            #expect(!unconstrained.clearCacheOnEviction)
+
+            let directory = URL(fileURLWithPath: "/tmp/gpu")
+            let a = MLXEmbeddingModel(directory: directory, name: "m", version: "1", dimension: 3)
+            let b = MLXEmbeddingModel(
+                directory: directory,
+                name: "m",
+                version: "1",
+                dimension: 3,
+                gpuMemory: unconstrained
+            )
+            #expect(a.gpuMemory == automatic)
+            #expect(b.gpuMemory == unconstrained)
+            #expect(a.identifier == b.identifier)
+        }
+
+        @Test("A load that throws restores the idle cache limit", .needsMetalLibrary)
+        func gpuMemoryAfterThrow() async throws {
+            let configuration = MLXEmbeddingModel.GPUMemoryConfiguration(
+                activeCacheLimit: 123_456_789,
+                idleCacheLimit: 98_765_432
+            )
+            let model = MLXEmbeddingModel(
+                directory: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"),
+                name: "m",
+                version: "1",
+                dimension: 3,
+                gpuMemory: configuration
+            )
+            try await removingFromCache(model) {
+                await #expect(throws: (any Error).self) { try await model.prewarm() }
+            }
+            let manager = GPUMemoryManager.shared
+            #expect(manager.activeScopeCount == 0)
+            // The idle limit is the largest of every configuration that the process has used.
+            #expect((manager.appliedLimit ?? 0) >= configuration.idleCacheLimit)
+            #expect(manager.appliedLimit != configuration.activeCacheLimit)
+        }
+
+        @Test("Cancelled and overlapping calls leave no scope active", .needsMetalLibrary)
+        func gpuMemoryOverlapping() async throws {
+            let models = (0 ..< 8).map { _ in
+                MLXEmbeddingModel(
+                    directory: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"),
+                    name: "m",
+                    version: "1",
+                    dimension: 3
+                )
+            }
+            await withTaskGroup(of: Void.self) { group in
+                for (index, model) in models.enumerated() {
+                    group.addTask {
+                        let task = Task { try await model.prewarm() }
+                        if index.isMultiple(of: 2) { task.cancel() }
+                        _ = await task.result
+                    }
+                }
+            }
+            for model in models { await model.removeFromCache() }
+            let manager = GPUMemoryManager.shared
+            #expect(manager.activeScopeCount == 0)
+            #expect(manager.appliedLimit != nil)
         }
 
         @Test("A local model's identifier uses its version and not its path")

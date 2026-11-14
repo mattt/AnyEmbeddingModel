@@ -26,6 +26,7 @@ run = "mise run _swift -- test"
 
 [tasks."test:mlx"]
 description = "Run the library tests with the MLX trait, using a local server in place of the Hub"
+env = { ANY_EMBEDDING_MODEL_TEST_METAL = "1" }
 usage = 'arg "[args]" var=#true help="Arguments for swift test"'
 run = '''
 #!/usr/bin/env bash
