@@ -6,13 +6,23 @@
 /// such as the prefixes,
 /// so that the identifier stays short but still changes when they change.
 ///
-/// Two different sets of values never have the same encoding.
+/// The framing of the fields is unambiguous:
+/// two different engines, models, revisions, or dimensions
+/// never have the same first four fields.
 /// Each field is the percent-encoding of its UTF-8 bytes,
 /// and only ASCII letters, digits, `-`, `.`, `_`, and `~` stay as they are.
 /// So an identifier is pure ASCII,
 /// the slashes between fields are the only slashes,
 /// and a combining mark can't attach to a slash and hide it.
-/// The fingerprint hashes each setting with its length.
+///
+/// The fingerprint is a 64-bit FNV-1a hash,
+/// so two different sets of settings can have the same fingerprint.
+/// It hashes each setting with its length,
+/// so settings that differ only in where one ends and the next begins
+/// are different inputs to the hash,
+/// but the hash itself can collide.
+/// The whole identifier is therefore not guaranteed to differ for different settings;
+/// a collision between two sets of settings is unlikely, but possible.
 ///
 /// Identity is by bytes.
 /// The package doesn't normalize Unicode,

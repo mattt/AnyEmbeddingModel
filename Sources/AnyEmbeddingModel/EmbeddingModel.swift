@@ -46,6 +46,8 @@ public protocol EmbeddingModel: Sendable {
     /// `mlx/BAAI%2Fbge-small-en-v1.5/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/384/17ad23889b01fd7d`.
     /// Each field is the percent-encoding of its UTF-8 bytes,
     /// and a revision of `-` means that the model has none.
+    /// The fingerprint is a 64-bit hash,
+    /// so two different sets of settings can share it, though that is unlikely.
     ///
     /// Identity is by bytes, with no Unicode normalization:
     /// composed and decomposed forms of the same text give different identifiers,
