@@ -756,8 +756,10 @@
         /// The limit that the manager set last, or `nil` if it hasn't started MLX's device.
         var appliedLimit: Int? { state.withLock { $0.appliedLimit } }
 
-        /// The number of calls that are loading or embedding now.
-        var activeScopeCount: Int { state.withLock { $0.activeScopes.count } }
+        /// The number of calls with `configuration` that are loading or embedding now.
+        func activeScopeCount(for configuration: MLXEmbeddingModel.GPUMemoryConfiguration) -> Int {
+            state.withLock { $0.activeScopes.values.filter { $0 == configuration }.count }
+        }
 
         func markActive(_ configuration: MLXEmbeddingModel.GPUMemoryConfiguration) -> UInt64 {
             state.withLock { state in

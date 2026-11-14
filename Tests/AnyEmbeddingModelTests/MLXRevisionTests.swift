@@ -570,21 +570,26 @@
             try await removingFromCache(model) {
                 await #expect(throws: (any Error).self) { try await model.prewarm() }
             }
+            // Other tests can load models at the same time,
+            // so the test counts only the scopes with its own configuration.
             let manager = GPUMemoryManager.shared
-            #expect(manager.activeScopeCount == 0)
-            // The idle limit is the largest of every configuration that the process has used.
-            #expect((manager.appliedLimit ?? 0) >= configuration.idleCacheLimit)
-            #expect(manager.appliedLimit != configuration.activeCacheLimit)
+            #expect(manager.activeScopeCount(for: configuration) == 0)
+            #expect(manager.appliedLimit != nil)
         }
 
         @Test("Cancelled and overlapping calls leave no scope active", .needsMetalLibrary)
         func gpuMemoryOverlapping() async throws {
+            let configuration = MLXEmbeddingModel.GPUMemoryConfiguration(
+                activeCacheLimit: 123_456_788,
+                idleCacheLimit: 98_765_431
+            )
             let models = (0 ..< 8).map { _ in
                 MLXEmbeddingModel(
                     directory: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"),
                     name: "m",
                     version: "1",
-                    dimension: 3
+                    dimension: 3,
+                    gpuMemory: configuration
                 )
             }
             await withTaskGroup(of: Void.self) { group in
@@ -598,7 +603,7 @@
             }
             for model in models { await model.removeFromCache() }
             let manager = GPUMemoryManager.shared
-            #expect(manager.activeScopeCount == 0)
+            #expect(manager.activeScopeCount(for: configuration) == 0)
             #expect(manager.appliedLimit != nil)
         }
 
