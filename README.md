@@ -160,6 +160,11 @@ to avoid that lookup next time.
 Loading still requires the model files.
 If the branch moves, a new call to `resolving` returns a different identifier.
 
+Copies of a model share one loaded copy of its weights.
+Call `removeFromCache()` to release a model's weights,
+or `MLXEmbeddingModel.removeAllFromCache()` to release every model's weights.
+The next embedding loads them again.
+
 To load files from disk, use `init(directory:name:version:dimension:)`.
 Change `version` whenever the files change,
 and do not change files while that version is in use.

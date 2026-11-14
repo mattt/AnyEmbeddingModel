@@ -418,11 +418,24 @@
             try await loader.container().modelDirectory
         }
 
-        /// Releases the weights of this model and of every copy of it.
+        /// Removes this model's weights from the shared cache and cancels any load in progress.
         ///
-        /// The next embedding loads them again.
-        public func unload() {
+        /// The removal applies to every copy of this model,
+        /// including copies that exist already.
+        /// A caller that is waiting for a load still receives that load's result,
+        /// but the result isn't cached.
+        /// The next embedding loads the weights again.
+        public func removeFromCache() async {
             loader.unload()
+        }
+
+        /// Removes the weights of every MLX embedding model from the shared cache
+        /// and cancels every load in progress.
+        ///
+        /// Models that exist already observe the removal,
+        /// and their next embedding loads the weights again.
+        public static func removeAllFromCache() async {
+            LoaderRegistry.unloadAll()
         }
 
         /// Returns a vector for each text, and loads the model if it isn't loaded.
@@ -553,6 +566,10 @@
     }
 
     /// The loaders of every model in this process, by the key of the files that they load.
+    ///
+    /// The registry keeps each loader for as long as the process runs,
+    /// so that every model with a key shares one loader,
+    /// and removing weights from the cache unloads a loader rather than forgetting it.
     private enum LoaderRegistry {
         static let loaders = Locked<[ModelLoaderKey: ModelLoader<EmbedderModelContainer>]>([:])
 
@@ -566,6 +583,14 @@
                 let loader = ModelLoader(load: load)
                 loaders[key] = loader
                 return loader
+            }
+        }
+
+        /// Unloads every loader, which every model that holds one observes.
+        static func unloadAll() {
+            let all = loaders.withLock { Array($0.values) }
+            for loader in all {
+                loader.unload()
             }
         }
     }

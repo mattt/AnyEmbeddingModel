@@ -244,23 +244,23 @@
             let miniLMVector = try await miniLM.embed(text, for: .document)
             #expect(cosine(bgeVector, miniLMVector) < 0.9)
 
-            try copyModelFiles(from: try await bge.modelDirectory(), to: directory)
             let first = MLXEmbeddingModel(directory: directory, name: "m", version: "1", dimension: 384)
-            defer { first.unload() }
-            let firstVector = try await first.embed(text, for: .document)
-            #expect(cosine(firstVector, bgeVector) > 0.9999)
-
-            for name in try manager.contentsOfDirectory(atPath: directory.path) {
-                try manager.removeItem(at: directory.appendingPathComponent(name))
-            }
-            try copyModelFiles(from: try await miniLM.modelDirectory(), to: directory)
-
             let second = MLXEmbeddingModel(directory: directory, name: "m", version: "2", dimension: 384)
-            defer { second.unload() }
-            #expect(second.identifier != first.identifier)
-            let secondVector = try await second.embed(text, for: .document)
-            #expect(cosine(secondVector, miniLMVector) > 0.9999)
-            #expect(cosine(secondVector, firstVector) < 0.9)
+            try await removingFromCache(first, second) {
+                try copyModelFiles(from: try await bge.modelDirectory(), to: directory)
+                let firstVector = try await first.embed(text, for: .document)
+                #expect(cosine(firstVector, bgeVector) > 0.9999)
+
+                for name in try manager.contentsOfDirectory(atPath: directory.path) {
+                    try manager.removeItem(at: directory.appendingPathComponent(name))
+                }
+                try copyModelFiles(from: try await miniLM.modelDirectory(), to: directory)
+
+                #expect(second.identifier != first.identifier)
+                let secondVector = try await second.embed(text, for: .document)
+                #expect(cosine(secondVector, miniLMVector) > 0.9999)
+                #expect(cosine(secondVector, firstVector) < 0.9)
+            }
         }
 
         @Test("Text in a path and a version can't make two local models share a loader")
@@ -295,23 +295,68 @@
                 version: "b@c",
                 dimension: 3
             )
-            defer {
-                a.unload()
-                b.unload()
-            }
+            try await removingFromCache(a, b) {
+                await #expect(throws: (any Error).self) { try await a.prewarm() }
+                guard case .unavailable(.failedToLoad) = a.availability else {
+                    Issue.record("The failed load wasn't reported: \(a.availability)")
+                    return
+                }
+                #expect(b.availability == .unavailable(.notLoaded))
 
-            await #expect(throws: (any Error).self) { try await a.prewarm() }
-            guard case .unavailable(.failedToLoad) = a.availability else {
-                Issue.record("The failed load wasn't reported: \(a.availability)")
-                return
+                await b.removeFromCache()
+                guard case .unavailable(.failedToLoad) = a.availability else {
+                    Issue.record("Removing the other model changed this one: \(a.availability)")
+                    return
+                }
             }
-            #expect(b.availability == .unavailable(.notLoaded))
+        }
 
-            b.unload()
-            guard case .unavailable(.failedToLoad) = a.availability else {
-                Issue.record("Unloading the other model changed this one: \(a.availability)")
-                return
-            }
+        /// Returns a model for a directory that doesn't exist, whose loads fail without MLX.
+        private func missingDirectoryModel() -> MLXEmbeddingModel {
+            MLXEmbeddingModel(
+                directory: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"),
+                name: "m",
+                version: "1",
+                dimension: 3
+            )
+        }
+
+        private func isFailed(_ model: MLXEmbeddingModel) -> Bool {
+            if case .unavailable(.failedToLoad) = model.availability { return true }
+            return false
+        }
+
+        @Test("Removing a model from the cache applies to copies that already exist")
+        func removeFromCacheReachesCopies() async throws {
+            let model = missingDirectoryModel()
+            let copy = model
+            let twin = MLXEmbeddingModel(
+                directory: try #require(model.directory),
+                name: "m",
+                version: "1",
+                dimension: 3
+            )
+            await #expect(throws: (any Error).self) { try await model.prewarm() }
+            #expect(isFailed(copy))
+            #expect(isFailed(twin))
+
+            await twin.removeFromCache()
+            #expect(model.availability == .unavailable(.notLoaded))
+            #expect(copy.availability == .unavailable(.notLoaded))
+        }
+
+        @Test("Removing every model from the cache applies to models that already exist")
+        func removeAllFromCacheReachesModels() async throws {
+            let first = missingDirectoryModel()
+            let second = missingDirectoryModel()
+            await #expect(throws: (any Error).self) { try await first.prewarm() }
+            await #expect(throws: (any Error).self) { try await second.prewarm() }
+            #expect(isFailed(first))
+            #expect(isFailed(second))
+
+            await MLXEmbeddingModel.removeAllFromCache()
+            #expect(first.availability == .unavailable(.notLoaded))
+            #expect(second.availability == .unavailable(.notLoaded))
         }
 
         @Test("A directory and a hub model that look alike have different loaders")

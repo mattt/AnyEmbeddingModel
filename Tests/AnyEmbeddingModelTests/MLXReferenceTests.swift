@@ -176,15 +176,16 @@
                 dimension: 1024,
                 prefixes: .qwen3()
             )
-            defer { model.unload() }
             // This shows that the engine is right and that the 4-bit preset's distance
             // from the reference comes from quantization.
             let tolerance = ReferenceTolerance(minimumCosine: 0.9995, maximumElementError: 0.005)
             var worst: (cosine: Float, error: Float) = (1, 0)
-            for item in fixture.cases {
-                let vector = try await model.embed(item.text, for: item.embeddingPurpose)
-                let result = compare(vector, with: item, tolerance: tolerance, label: "full precision")
-                worst = (min(worst.cosine, result.cosine), max(worst.error, result.error))
+            try await removingFromCache(model) {
+                for item in fixture.cases {
+                    let vector = try await model.embed(item.text, for: item.embeddingPurpose)
+                    let result = compare(vector, with: item, tolerance: tolerance, label: "full precision")
+                    worst = (min(worst.cosine, result.cosine), max(worst.error, result.error))
+                }
             }
             print("reference qwen3-full: lowest cosine \(worst.cosine), largest error \(worst.error)")
         }

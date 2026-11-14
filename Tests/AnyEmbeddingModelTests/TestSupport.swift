@@ -2,6 +2,8 @@
     import Foundation
     import Testing
 
+    @testable import AnyEmbeddingModel
+
     extension Trait where Self == ConditionTrait {
         /// Runs a test only if `ANY_EMBEDDING_MODEL_TEST_HUB` is set.
         ///
@@ -13,6 +15,21 @@
                 if: ProcessInfo.processInfo.environment["ANY_EMBEDDING_MODEL_TEST_HUB"] != nil,
                 "Set ANY_EMBEDDING_MODEL_TEST_HUB=1 to load real models."
             )
+        }
+    }
+
+    /// Runs `body`, then removes each model from the cache, even if `body` throws.
+    func removingFromCache<Result>(
+        _ models: MLXEmbeddingModel...,
+        body: () async throws -> Result
+    ) async throws -> Result {
+        do {
+            let result = try await body()
+            for model in models { await model.removeFromCache() }
+            return result
+        } catch {
+            for model in models { await model.removeFromCache() }
+            throw error
         }
     }
 
