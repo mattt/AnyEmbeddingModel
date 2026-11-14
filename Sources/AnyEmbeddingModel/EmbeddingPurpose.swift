@@ -7,9 +7,9 @@
 /// A model uses the purpose to choose the prefix,
 /// so that callers don't need to know the convention of each model.
 public enum EmbeddingPurpose: Sendable, Hashable, CaseIterable {
-  /// Text to search with, such as a question.
-  case query
+    /// Text to search with, such as a question.
+    case query
 
-  /// Text to search for, such as a saved note or a passage.
-  case document
+    /// Text to search for, such as a saved note or a passage.
+    case document
 }
