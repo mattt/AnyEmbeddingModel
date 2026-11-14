@@ -192,7 +192,9 @@
         ///   - maximumBatchSize: The maximum number of texts that the model runs at one time.
         ///   - hub: The client that downloads the model, or `nil` for the default client.
         ///   - gpuMemory: The limits on MLX's cache of GPU buffers.
-        /// - Throws: ``EmbeddingError/Kind/invalidCommit``
+        /// - Throws: ``EmbeddingError/Kind/invalidRepository``
+        ///   if `modelId` isn't of the form `namespace/name`,
+        ///   or ``EmbeddingError/Kind/invalidCommit``
         ///   if `commit` isn't a full commit hash.
         public init(
             modelId: String,
@@ -204,6 +206,7 @@
             hub: HubClient? = nil,
             gpuMemory: GPUMemoryConfiguration = .automatic
         ) throws(EmbeddingError) {
+            guard Self.isRepositoryID(modelId) else { throw .invalidRepository(modelId) }
             guard Self.isCommitHash(commit) else { throw .invalidCommit(commit) }
             self.init(
                 pinned: modelId,
@@ -290,7 +293,7 @@
         ///   - gpuMemory: The limits on MLX's cache of GPU buffers.
         /// - Returns: A model pinned to the commit.
         /// - Throws: ``EmbeddingError/Kind/invalidResponse`` if the Hub reports no commit,
-        ///   ``EmbeddingError/Kind/unavailable`` if `modelId` isn't of the form `namespace/name`,
+        ///   ``EmbeddingError/Kind/invalidRepository`` if `modelId` isn't of the form `namespace/name`,
         ///   or an error from the Hub client if the request fails.
         public static func resolving(
             modelId: String,
@@ -303,12 +306,12 @@
             gpuMemory: GPUMemoryConfiguration = .automatic
         ) async throws -> MLXEmbeddingModel {
             let commit: String
+            guard isRepositoryID(modelId), let repository = Repo.ID(rawValue: modelId) else {
+                throw EmbeddingError.invalidRepository(modelId)
+            }
             if isCommitHash(revision) {
                 commit = revision
             } else {
-                guard let repository = Repo.ID(rawValue: modelId) else {
-                    throw EmbeddingError.unavailable("\(modelId) isn't of the form namespace/name.")
-                }
                 let model = try await (hub ?? HubClient()).getModel(repository, revision: revision)
                 guard let sha = model.sha, isCommitHash(sha) else {
                     throw EmbeddingError.invalidResponse(
@@ -327,6 +330,27 @@
                 hub: hub,
                 gpuMemory: gpuMemory
             )
+        }
+
+        /// Returns whether `string` names a Hub repository:
+        /// a namespace and a name, separated by one slash,
+        /// each made of ASCII letters, digits, `-`, `_`, and `.`,
+        /// and neither of them `.` or `..`.
+        ///
+        /// `Repo.ID` accepts any text with a slash, such as an absolute path,
+        /// so both of the model's Hub entry points use this check instead.
+        static func isRepositoryID(_ string: String) -> Bool {
+            let parts = string.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return false }
+            return parts.allSatisfy { part in
+                !part.isEmpty && part != "." && part != ".."
+                    && part.utf8.allSatisfy { byte in
+                        switch byte {
+                        case 0x30 ... 0x39, 0x41 ... 0x5A, 0x61 ... 0x7A, 0x2D, 0x2E, 0x5F: true
+                        default: false
+                        }
+                    }
+            }
         }
 
         /// Returns whether `string` is a full, lowercase, 40-character commit hash.

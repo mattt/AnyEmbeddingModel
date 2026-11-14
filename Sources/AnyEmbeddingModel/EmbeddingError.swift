@@ -47,6 +47,10 @@ public struct EmbeddingError: Error, Hashable, Sendable, CustomStringConvertible
         /// The string in ``EmbeddingError/message`` isn't a full, 40-character commit hash.
         public static let invalidCommit = Kind("Invalid commit")
 
+        /// The string in ``EmbeddingError/message`` isn't the name of a Hub repository
+        /// of the form `namespace/name`.
+        public static let invalidRepository = Kind("Invalid repository")
+
         /// A model or a server returned something that the model can't use,
         /// as ``EmbeddingError/message`` describes.
         public static let invalidResponse = Kind("Invalid response")
@@ -114,6 +118,11 @@ public struct EmbeddingError: Error, Hashable, Sendable, CustomStringConvertible
     /// An error of kind ``Kind/invalidCommit`` for the rejected string.
     public static func invalidCommit(_ commit: String) -> EmbeddingError {
         EmbeddingError(.invalidCommit, message: commit)
+    }
+
+    /// An error of kind ``Kind/invalidRepository`` for the rejected string.
+    public static func invalidRepository(_ modelId: String) -> EmbeddingError {
+        EmbeddingError(.invalidRepository, message: modelId)
     }
 
     /// An error of kind ``Kind/invalidResponse``, with a description of the problem.

@@ -265,9 +265,52 @@
                 let error = await #expect(throws: EmbeddingError.self) {
                     try await MLXEmbeddingModel.resolving(modelId: "model", dimension: 3, hub: hub)
                 }
-                #expect(error?.kind == .unavailable)
+                #expect(error?.kind == .invalidRepository)
                 #expect(server.requests.isEmpty)
             }
+        }
+
+        static let malformedRepositories = [
+            "", "model", "/model", "org/", "/", "a/b/c", "/tmp/org/model", "org//model",
+            "org/mo del", "org/./x", "./model", "org/..", "org/caf\u{E9}",
+        ]
+
+        @Test(
+            "A malformed repository name is rejected by both entry points, before any request",
+            arguments: malformedRepositories
+        )
+        func malformedRepository(name: String) async throws {
+            #expect(throws: EmbeddingError.invalidRepository(name)) {
+                try MLXEmbeddingModel(modelId: name, commit: commitA, dimension: 3)
+            }
+            // An invalid commit doesn't hide the repository's error.
+            #expect(throws: EmbeddingError.invalidRepository(name)) {
+                try MLXEmbeddingModel(modelId: name, commit: "main", dimension: 3)
+            }
+            try await withHub(.json(modelJSON(sha: commitA))) { server, hub in
+                for revision in ["main", commitA] {
+                    await #expect(throws: EmbeddingError.invalidRepository(name)) {
+                        try await MLXEmbeddingModel.resolving(
+                            modelId: name,
+                            revision: revision,
+                            dimension: 3,
+                            hub: hub
+                        )
+                    }
+                }
+                #expect(server.requests.isEmpty)
+            }
+        }
+
+        @Test(
+            "Valid repository names are accepted",
+            arguments: [
+                "org/model", "BAAI/bge-small-en-v1.5", "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ", "a_b/c.d",
+            ]
+        )
+        func validRepository(name: String) throws {
+            #expect(MLXEmbeddingModel.isRepositoryID(name))
+            _ = try MLXEmbeddingModel(modelId: name, commit: commitA, dimension: 3)
         }
 
         /// Copies the files that MLX reads from a model directory, following the cache's links.
@@ -453,12 +496,13 @@
             #expect(c.directory?.path == d.directory?.path)
             #expect(c.loaderKey == d.loaderKey)
 
-            // A repository name is text, so its forms are different repositories.
-
-            let e = try MLXEmbeddingModel(modelId: "org/\(composed)", commit: commitA, dimension: 3)
-            let f = try MLXEmbeddingModel(modelId: "org/\(decomposed)", commit: commitA, dimension: 3)
-            #expect(e.identifier != f.identifier)
-            #expect(e.loaderKey != f.loaderKey)
+            // A Hub repository name is ASCII, so it has one form,
+            // and the model rejects a name in either form of this text.
+            for name in ["org/\(composed)", "org/\(decomposed)"] {
+                #expect(throws: EmbeddingError.invalidRepository(name)) {
+                    try MLXEmbeddingModel(modelId: name, commit: commitA, dimension: 3)
+                }
+            }
         }
 
         @Test("A failed load doesn't change a model whose version is canonically equivalent", .needsMetalLibrary)
@@ -475,17 +519,14 @@
 
         @Test("A directory and a hub model that look alike have different loaders")
         func directoryAndHubModelKeys() throws {
-            let path = "/tmp/org/model"
-            let directory = MLXEmbeddingModel(
-                directory: URL(fileURLWithPath: path),
-                name: "m",
-                version: commitA,
-                dimension: 3
-            )
-            let hub = try MLXEmbeddingModel(modelId: path, commit: commitA, dimension: 3)
-            #expect(directory.loaderKey.location == hub.loaderKey.location)
-            #expect(directory.loaderKey.version == hub.loaderKey.version)
-            #expect(directory.loaderKey != hub.loaderKey)
+            let directory = ModelLoaderKey(source: .directory, location: "org/model", version: commitA)
+            let hub = ModelLoaderKey(source: .hub, location: "org/model", version: commitA)
+            #expect(directory.location == hub.location)
+            #expect(directory.version == hub.version)
+            #expect(directory != hub)
+
+            let model = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3)
+            #expect(model.loaderKey == hub)
         }
 
         @Test("GPU memory presets have the documented limits, and don't change the identifier")
