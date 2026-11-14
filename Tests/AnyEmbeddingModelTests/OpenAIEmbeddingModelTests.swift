@@ -21,10 +21,10 @@
             try await withServer(.vectors(dimension: 4)) { server, url in
                 let model = OpenAIEmbeddingModel(
                     baseURL: url,
+                    apiKey: "test-key",
                     model: "mock-model",
                     dimension: 4,
-                    prefixes: .nomic,
-                    apiKey: "test-key"
+                    prefixes: .nomic
                 )
                 let vectors = try await model.embed(["alpha", "beta", "gamma"], for: .query)
 
@@ -55,6 +55,7 @@
             try await withServer(.vectors(dimension: 2)) { server, url in
                 let model = OpenAIEmbeddingModel(
                     baseURL: url,
+                    apiKey: "",
                     model: "m",
                     dimension: 2,
                     maximumBatchSize: 2
@@ -73,6 +74,7 @@
             try await withServer(.vectors(dimension: 3)) { server, url in
                 let model = OpenAIEmbeddingModel(
                     baseURL: url,
+                    apiKey: "",
                     model: "m",
                     dimension: 3,
                     requestsDimension: true
@@ -103,7 +105,7 @@
         @Test("Reports the server's error status and body")
         func serverError() async throws {
             try await withServer(.error(status: 413, message: "Input is too long.")) { _, url in
-                let model = OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3)
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
                 let (error, _) = await errorText(model)
                 let failure = try #require(failure(error))
                 #expect(failure.kind == .httpError)
@@ -114,8 +116,8 @@
 
         private static let key = "sk-secret/one+two"
 
-        private func model(_ url: URL, apiKey: String? = key) -> OpenAIEmbeddingModel {
-            OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3, apiKey: apiKey)
+        private func model(_ url: URL, apiKey: String = key) -> OpenAIEmbeddingModel {
+            OpenAIEmbeddingModel(baseURL: url, apiKey: apiKey, model: "m", dimension: 3)
         }
 
         /// Returns the error from one embedding, as all of the text that a log could show.
@@ -219,10 +221,92 @@
         @Test("Leaves a message unchanged when there is no key")
         func noKeyNoRedaction() async throws {
             try await withServer(.text(status: 500, body: "sk-secret/one+two broke")) { _, url in
-                let (error, _) = await errorText(model(url, apiKey: nil))
+                let (error, _) = await errorText(model(url, apiKey: ""))
                 #expect(
                     failure(error) == Failure(kind: .httpError, status: 500, body: "sk-secret/one+two broke")
                 )
+            }
+        }
+
+        @Test("The base URL defaults to OpenAI's and always ends with a slash")
+        func baseURL() async throws {
+            #expect(OpenAIEmbeddingModel.defaultBaseURL.absoluteString == "https://api.openai.com/v1/")
+            #expect(
+                OpenAIEmbeddingModel(apiKey: "", model: "m", dimension: 3).baseURL
+                    == OpenAIEmbeddingModel.defaultBaseURL
+            )
+            for path in ["v1", "v1/"] {
+                let model = OpenAIEmbeddingModel(
+                    baseURL: URL(string: "http://a.example/\(path)")!,
+                    apiKey: "",
+                    model: "m",
+                    dimension: 3
+                )
+                #expect(model.baseURL.absoluteString == "http://a.example/v1/")
+            }
+            try await withServer(.vectors(dimension: 3)) { server, url in
+                let slashed = url.appendingPathComponent("")
+                #expect(slashed.absoluteString.hasSuffix("/v1/"))
+                let model = OpenAIEmbeddingModel(baseURL: slashed, apiKey: "", model: "m", dimension: 3)
+                _ = try await model.embed(["a"], for: .document)
+                #expect(server.requests.map(\.path) == ["/v1/embeddings"])
+            }
+        }
+
+        @Test("An empty key sends no Authorization header")
+        func emptyKey() async throws {
+            try await withServer(.vectors(dimension: 3)) { server, url in
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
+                _ = try await model.embed(["a"], for: .document)
+                let request = try #require(server.requests.first)
+                #expect(request.headers["authorization"] == nil)
+            }
+        }
+
+        @Test("The key is evaluated once for each request")
+        func keyPerRequest() async throws {
+            let calls = TestLock(0)
+            let key: @Sendable () -> String = {
+                calls.withLock { count in
+                    count += 1
+                    return "sk-\(count)"
+                }
+            }
+            try await withServer(.vectors(dimension: 3)) { server, url in
+                let model = OpenAIEmbeddingModel(
+                    baseURL: url,
+                    apiKey: key(),
+                    model: "m",
+                    dimension: 3,
+                    maximumBatchSize: 2
+                )
+                _ = try await model.embed(["a", "b", "c", "d", "e"], for: .document)
+                #expect(calls.withLock { $0 } == 3)
+                #expect(
+                    server.requests.map { $0.headers["authorization"] } == [
+                        "Bearer sk-1", "Bearer sk-2", "Bearer sk-3",
+                    ]
+                )
+            }
+        }
+
+        @Test("A response is screened for the key that its request sent, after the key rotates")
+        func rotatedKey() async throws {
+            let calls = TestLock(0)
+            let key: @Sendable () -> String = {
+                calls.withLock { count in
+                    count += 1
+                    return count == 1 ? "sk-first-key" : "sk-second-key"
+                }
+            }
+            try await withServer(.echoAuthorization(status: 401)) { _, url in
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: key(), model: "m", dimension: 3)
+                let (first, firstText) = await errorText(model)
+                #expect(failure(first) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(!firstText.contains("sk-first-key"))
+                let (second, secondText) = await errorText(model)
+                #expect(failure(second) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(!secondText.contains("sk-second-key"))
             }
         }
 
@@ -239,7 +323,7 @@
         @Test("Rejects a vector of the wrong dimension")
         func wrongDimension() async throws {
             try await withServer(.vectors(dimension: 5)) { _, url in
-                let model = OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3)
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
                 await #expect(throws: EmbeddingError.dimensionMismatch(expected: 3, actual: 5)) {
                     try await model.embed(["a"], for: .document)
                 }
@@ -249,7 +333,7 @@
         @Test("Rejects a response with a missing vector")
         func missingVector() async throws {
             try await withServer(.missingVector(dimension: 3)) { _, url in
-                let model = OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3)
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
                 await #expect(throws: EmbeddingError.wrongVectorCount(expected: 2, actual: 1)) {
                     try await model.embed(["a", "b"], for: .document)
                 }
@@ -259,7 +343,7 @@
         @Test("Rejects empty text before it sends a request")
         func emptyText() async throws {
             try await withServer(.vectors(dimension: 3)) { server, url in
-                let model = OpenAIEmbeddingModel(baseURL: url, model: "m", dimension: 3)
+                let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
                 await #expect(throws: EmbeddingError.emptyText(index: 1)) {
                     try await model.embed(["a", "  "], for: .document)
                 }
@@ -271,22 +355,26 @@
         func identifier() {
             let a = OpenAIEmbeddingModel(
                 baseURL: URL(string: "http://a.example/v1")!,
+                apiKey: "",
                 model: "m",
                 dimension: 3
             )
             let b = OpenAIEmbeddingModel(
                 baseURL: URL(string: "http://b.example/v1")!,
+                apiKey: "",
                 model: "m",
                 dimension: 3
             )
             let c = OpenAIEmbeddingModel(
                 baseURL: URL(string: "http://a.example/v1")!,
+                apiKey: "",
                 model: "m",
                 dimension: 3,
                 prefixes: .e5
             )
             let d = OpenAIEmbeddingModel(
                 baseURL: URL(string: "http://a.example/v1")!,
+                apiKey: "",
                 model: "m",
                 dimension: 3,
                 revision: "2"
@@ -302,12 +390,13 @@
         func identifierGoldens() {
             let url = URL(string: "http://a.example/v1")!
             #expect(
-                OpenAIEmbeddingModel(baseURL: url, model: "text-embedding-3-small", dimension: 1536)
+                OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "text-embedding-3-small", dimension: 1536)
                     .identifier == "openai/text-embedding-3-small/-/1536/11dac35ef0813626"
             )
             #expect(
                 OpenAIEmbeddingModel(
                     baseURL: url,
+                    apiKey: "",
                     model: "nomic-embed-text:latest",
                     dimension: 768,
                     requestsDimension: true,
@@ -316,11 +405,11 @@
                 ).identifier == "openai/nomic-embed-text%3Alatest/2/768/99860da7f4726551"
             )
             #expect(
-                OpenAIEmbeddingModel(baseURL: url, model: "mod\u{E8}le", dimension: 3).identifier
+                OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "mod\u{E8}le", dimension: 3).identifier
                     == "openai/mod%C3%A8le/-/3/11dac35ef0813626"
             )
             #expect(
-                OpenAIEmbeddingModel(baseURL: url, model: "mode\u{300}le", dimension: 3).identifier
+                OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "mode\u{300}le", dimension: 3).identifier
                     == "openai/mode%CC%80le/-/3/11dac35ef0813626"
             )
         }
@@ -328,17 +417,19 @@
         @Test("The public initializer can't produce colliding identifiers")
         func identifierCollisions() {
             let url = URL(string: "http://a.example/v1")!
-            let a = OpenAIEmbeddingModel(baseURL: url, model: "org/m", dimension: 3, revision: "v/1")
-            let b = OpenAIEmbeddingModel(baseURL: url, model: "org/m/v", dimension: 3, revision: "1")
+            let a = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "org/m", dimension: 3, revision: "v/1")
+            let b = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "org/m/v", dimension: 3, revision: "1")
             #expect(a.identifier != b.identifier)
             let c = OpenAIEmbeddingModel(
                 baseURL: url,
+                apiKey: "",
                 model: "m",
                 dimension: 3,
                 prefixes: EmbeddingPrefixes(query: "a\0", document: "b")
             )
             let d = OpenAIEmbeddingModel(
                 baseURL: url,
+                apiKey: "",
                 model: "m",
                 dimension: 3,
                 prefixes: EmbeddingPrefixes(query: "a", document: "\0b")

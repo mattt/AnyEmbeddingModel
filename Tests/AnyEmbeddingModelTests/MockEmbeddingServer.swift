@@ -21,6 +21,9 @@
             /// A JSON body with status 200, for any request.
             case json(String)
 
+            /// The request's `Authorization` header as a plain-text body, with the status.
+            case echoAuthorization(status: Int)
+
             /// A plain-text body with the status, and extra response headers.
             case text(status: Int, body: String, headers: [String: String] = [:])
         }
@@ -158,6 +161,9 @@
                 status = code
                 text = body
                 headers = extra
+            case .echoAuthorization(let code):
+                status = code
+                text = request.headers["authorization"] ?? ""
             case .error(let code, let message):
                 status = code
                 payload = ["error": ["message": message, "type": "invalid_request_error"]]

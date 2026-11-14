@@ -186,13 +186,19 @@ import Foundation
 
 let model = OpenAIEmbeddingModel(
     baseURL: URL(string: "http://localhost:8080/v1")!,
+    apiKey: "",
     model: "BAAI/bge-small-en-v1.5",
     dimension: 384,
     prefixes: .bge
 )
 ```
 
-Pass `apiKey` if the server requires a bearer token.
+`baseURL` defaults to `OpenAIEmbeddingModel.defaultBaseURL`, OpenAI's API.
+`apiKey` is a string or a closure that returns one,
+and the model evaluates it for each request.
+An empty key sends no `Authorization` header.
+If an error response might contain the key,
+the model withholds the server's text from the error.
 The backend adds `prefixes` before sending each text.
 If the server supports shorter vectors,
 set `requestsDimension: true` to send `dimension` in the request.

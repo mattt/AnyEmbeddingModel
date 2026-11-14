@@ -50,9 +50,9 @@
 
                 let model = OpenAIEmbeddingModel(
                     baseURL: originURL,
+                    apiKey: apiKey,
                     model: "m",
                     dimension: 3,
-                    apiKey: apiKey.isEmpty ? nil : apiKey,
                     transport: transport.transport
                 )
                 do {

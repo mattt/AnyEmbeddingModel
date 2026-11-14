@@ -19,14 +19,21 @@ import HTTPTypes
 /// ```swift
 /// let model = OpenAIEmbeddingModel(
 ///   baseURL: URL(string: "http://localhost:8080/v1")!,
+///   apiKey: "",
 ///   model: "BAAI/bge-small-en-v1.5",
 ///   dimension: 384,
 ///   prefixes: .bge
 /// )
 /// ```
 public struct OpenAIEmbeddingModel: EmbeddingModel {
+    /// The base URL of OpenAI's API, `https://api.openai.com/v1/`.
+    public static let defaultBaseURL = URL(string: "https://api.openai.com/v1/")!
+
     /// The URL that the path `embeddings` is added to,
-    /// such as `https://api.openai.com/v1`.
+    /// such as `https://api.openai.com/v1/`.
+    ///
+    /// It ends with a slash,
+    /// which the initializer adds if the URL that you pass has none.
     public let baseURL: URL
 
     /// The name of the model on the server.
@@ -63,48 +70,59 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     /// and it can't detect that a server changed the model behind a name.
     public let identifier: String
 
-    private let apiKey: APIKey?
+    /// Returns the API key for a request.
+    ///
+    /// A closure isn't printed or dumped with the model, so the key isn't either.
+    private let tokenProvider: @Sendable () -> String
     private let transport: any HTTPTransport
 
     /// Creates a model.
     ///
     /// - Parameters:
     ///   - baseURL: The URL that the path `embeddings` is added to.
+    ///     The default is ``defaultBaseURL``.
+    ///   - apiKey: A key to send as a bearer token, or a closure that returns one.
+    ///     An empty key sends no `Authorization` header.
+    ///     The model evaluates it once for each request,
+    ///     so a closure can return a new key after a rotation.
+    ///     If a response contains the key that its request sent,
+    ///     errors omit the server's text and say that it was withheld.
+    ///     The model looks for the key after it decodes JSON escapes and percent-encoding,
+    ///     in any ASCII case, and it also withholds text that it can't decode with confidence.
+    ///     It can't detect part of a key, such as a masked copy,
+    ///     or a key in another encoding, such as Base64.
     ///   - model: The name of the model on the server.
     ///   - dimension: The number of elements in each vector.
     ///   - requestsDimension: Whether to send `dimension` in each request.
     ///   - prefixes: The text before each query and document.
     ///   - revision: A string that changes ``identifier``
     ///     when the server changes the model behind the same name.
-    ///   - apiKey: A key to send as a bearer token, or `nil` to send none.
-    ///     If a response contains the key, errors omit the server's text
-    ///     and say that it was withheld.
-    ///     The model looks for the key after it decodes JSON escapes and percent-encoding,
-    ///     in any ASCII case, and it also withholds text that it can't decode with confidence.
-    ///     It can't detect part of a key, such as a masked copy,
-    ///     or a key in another encoding, such as Base64.
     ///   - maximumBatchSize: The maximum number of texts in one request.
     ///   - transport: How the model sends its requests: by default ``makeDefaultTransport()``.
     public init(
-        baseURL: URL,
+        baseURL: URL = defaultBaseURL,
+        apiKey tokenProvider: @escaping @autoclosure @Sendable () -> String,
         model: String,
         dimension: Int,
         requestsDimension: Bool = false,
         prefixes: EmbeddingPrefixes = .none,
         revision: String? = nil,
-        apiKey: String? = nil,
         maximumBatchSize: Int = 64,
         transport: any HTTPTransport = makeDefaultTransport()
     ) {
         precondition(dimension > 0, "The dimension must be greater than zero.")
         precondition(maximumBatchSize > 0, "The batch size must be greater than zero.")
+        var baseURL = baseURL
+        if !baseURL.path.hasSuffix("/") {
+            baseURL = baseURL.appendingPathComponent("")
+        }
         self.baseURL = baseURL
         self.model = model
         self.dimension = dimension
         self.requestsDimension = requestsDimension
         self.prefixes = prefixes
         self.revision = revision
-        self.apiKey = apiKey.map(APIKey.init)
+        self.tokenProvider = tokenProvider
         self.maximumBatchSize = maximumBatchSize
         self.transport = transport
         self.identifier = Identifier.make(
@@ -181,17 +199,6 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
         )
     }
 
-    /// An API key that doesn't appear when the model is printed or dumped.
-    private struct APIKey: Sendable, CustomStringConvertible, CustomDebugStringConvertible,
-        CustomReflectable
-    {
-        let value: String
-
-        var description: String { "<redacted>" }
-        var debugDescription: String { "<redacted>" }
-        var customMirror: Mirror { Mirror(self, children: [:]) }
-    }
-
     private struct Request: Encodable {
         var model: String
         var input: [String]
@@ -215,8 +222,11 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     /// Sends one request and returns the vectors in the order of `inputs`.
     private func request(_ inputs: [String]) async throws -> [[Float]] {
         var fields = HTTPFields()
-        if let apiKey {
-            fields[.authorization] = "Bearer \(apiKey.value)"
+        // The key is evaluated once,
+        // so the response is screened for the key that this request sent.
+        let apiKey = tokenProvider()
+        if !apiKey.isEmpty {
+            fields[.authorization] = "Bearer \(apiKey)"
         }
         let request = HTTPRequest(
             method: .post,
@@ -226,7 +236,7 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
         let body = try JSONEncoder().encode(
             Request(model: model, input: inputs, dimensions: requestsDimension ? dimension : nil)
         )
-        let screen = apiKey.map { CredentialScreen(credential: $0.value) }
+        let screen = apiKey.isEmpty ? nil : CredentialScreen(credential: apiKey)
 
         let data: Data
         do {
