@@ -2,6 +2,11 @@
 ///
 /// The fields are separate, so that no text in a path, a name, or a version
 /// can make two different sources look alike.
+/// The key compares the UTF-8 bytes of each field,
+/// as ``Identifier`` does,
+/// because `String` treats canonically equivalent text as equal:
+/// a version or a path in composed form and in decomposed form
+/// are different keys, as they are different identifiers.
 struct ModelLoaderKey: Hashable, Sendable {
     /// Where the files come from.
     enum Source: Hashable, Sendable {
@@ -14,11 +19,17 @@ struct ModelLoaderKey: Hashable, Sendable {
 
     let source: Source
 
-    /// The repository of a hub model, or the path of a directory.
-    let location: String
+    /// The UTF-8 bytes of the repository of a hub model, or of the path of a directory.
+    let location: [UInt8]
 
-    /// The commit of a hub model, or the version of a directory.
-    let version: String
+    /// The UTF-8 bytes of the commit of a hub model, or of the version of a directory.
+    let version: [UInt8]
+
+    init(source: Source, location: String, version: String) {
+        self.source = source
+        self.location = Array(location.utf8)
+        self.version = Array(version.utf8)
+    }
 }
 
 /// Loads a value once and shares it between callers.

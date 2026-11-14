@@ -377,6 +377,55 @@
             #expect(second.availability == .unavailable(.notLoaded))
         }
 
+        @Test("Canonically equivalent versions and repositories have different loaders")
+        func loaderKeyBytes() throws {
+            let composed = "caf\u{E9}"
+            let decomposed = "cafe\u{301}"
+            #expect(composed == decomposed)
+
+            let directory = URL(fileURLWithPath: "/tmp/model")
+            let a = MLXEmbeddingModel(directory: directory, name: "m", version: composed, dimension: 3)
+            let b = MLXEmbeddingModel(directory: directory, name: "m", version: decomposed, dimension: 3)
+            #expect(a.identifier != b.identifier)
+            #expect(a.loaderKey != b.loaderKey)
+
+            // A file URL stores its path in one form,
+            // so both paths name the same directory and share a loader.
+            let c = MLXEmbeddingModel(
+                directory: URL(fileURLWithPath: "/tmp/\(composed)"),
+                name: "m",
+                version: "1",
+                dimension: 3
+            )
+            let d = MLXEmbeddingModel(
+                directory: URL(fileURLWithPath: "/tmp/\(decomposed)"),
+                name: "m",
+                version: "1",
+                dimension: 3
+            )
+            #expect(c.directory?.path == d.directory?.path)
+            #expect(c.loaderKey == d.loaderKey)
+
+            // A repository name is text, so its forms are different repositories.
+
+            let e = try MLXEmbeddingModel(modelId: "org/\(composed)", commit: commitA, dimension: 3)
+            let f = try MLXEmbeddingModel(modelId: "org/\(decomposed)", commit: commitA, dimension: 3)
+            #expect(e.identifier != f.identifier)
+            #expect(e.loaderKey != f.loaderKey)
+        }
+
+        @Test("A failed load doesn't change a model whose version is canonically equivalent", .needsMetalLibrary)
+        func loaderStateByBytes() async throws {
+            let directory = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
+            let composed = MLXEmbeddingModel(directory: directory, name: "m", version: "\u{E9}", dimension: 3)
+            let decomposed = MLXEmbeddingModel(directory: directory, name: "m", version: "e\u{301}", dimension: 3)
+            try await removingFromCache(composed, decomposed) {
+                await #expect(throws: (any Error).self) { try await composed.prewarm() }
+                #expect(isFailed(composed))
+                #expect(decomposed.availability == .unavailable(.notLoaded))
+            }
+        }
+
         @Test("A directory and a hub model that look alike have different loaders")
         func directoryAndHubModelKeys() throws {
             let path = "/tmp/org/model"
