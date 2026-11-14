@@ -129,6 +129,12 @@
         /// Loading the model still requires its files.
         public let revision: String
 
+        /// The Hugging Face Hub client that downloads the model,
+        /// or `nil` for the default client.
+        ///
+        /// A model from a local directory has none.
+        public let hub: HubClient?
+
         /// A local directory with the model files,
         /// or `nil` to download them.
         public let directory: URL?
@@ -375,6 +381,7 @@
             self.maximumTokenCount = maximumTokenCount
             self.maximumBatchSize = maximumBatchSize
             self.gpuMemory = gpuMemory
+            self.hub = hub
             self.identifier = Identifier.make(
                 engine: "mlx",
                 model: modelId,

@@ -170,6 +170,24 @@
             }
         }
 
+        @Test("A model keeps the Hub client that it was given")
+        func hubProperty() async throws {
+            try await withHub(.json(modelJSON(sha: commitA))) { _, hub in
+                let pinned = try MLXEmbeddingModel(modelId: "org/model", commit: commitA, dimension: 3, hub: hub)
+                #expect(pinned.hub === hub)
+                let resolved = try await MLXEmbeddingModel.resolving(modelId: "org/model", dimension: 3, hub: hub)
+                #expect(resolved.hub === hub)
+            }
+            #expect(MLXEmbeddingModel.bgeSmallEnglish.hub == nil)
+            let local = MLXEmbeddingModel(
+                directory: URL(fileURLWithPath: "/tmp/m"),
+                name: "m",
+                version: "1",
+                dimension: 3
+            )
+            #expect(local.hub == nil)
+        }
+
         @Test("Resolving a commit hash makes no request")
         func resolvingACommit() async throws {
             try await withHub(.json("{}")) { server, hub in
