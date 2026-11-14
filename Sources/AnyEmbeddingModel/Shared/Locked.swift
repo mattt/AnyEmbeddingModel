@@ -1,20 +1,27 @@
 import Foundation
 
-/// A value that one thread at a time can read or change.
+/// Protects shared mutable state behind an `NSLock`.
 ///
 /// `Synchronization.Mutex` needs macOS 15 and iOS 18,
 /// and this package supports macOS 14 and iOS 17.
-final class Locked<Value>: @unchecked Sendable {
+/// Like AnyLanguageModel's `Locked`,
+/// it is `Sendable` only when its state is,
+/// so it can't hide a value that isn't safe to share.
+final class Locked<State> {
     private let lock = NSLock()
-    private var value: Value
+    private var state: State
 
-    init(_ value: Value) {
-        self.value = value
+    /// Creates a locked container with the given initial state.
+    init(_ state: State) {
+        self.state = state
     }
 
-    func withLock<Result>(_ body: (inout Value) throws -> Result) rethrows -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body(&value)
+    /// Executes `body` while holding the lock.
+    ///
+    /// Keep the body small and synchronous.
+    func withLock<T>(_ body: (inout State) throws -> T) rethrows -> T {
+        try lock.withLock { try body(&self.state) }
     }
 }
+
+extension Locked: @unchecked Sendable where State: Sendable {}

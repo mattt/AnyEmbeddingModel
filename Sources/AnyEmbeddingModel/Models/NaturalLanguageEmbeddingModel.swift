@@ -41,7 +41,7 @@
         /// the identifier changes too.
         public let identifier: String
 
-        private let embedding: Locked<NLEmbedding>
+        private let embedding: SerializedEmbedding
 
         /// Creates a model with the current sentence embedding for a language,
         /// or returns `nil` if the system has none.
@@ -69,7 +69,7 @@
             self.revision = embedding.revision
             self.dimension = embedding.dimension
             self.prefixes = prefixes
-            self.embedding = Locked(embedding)
+            self.embedding = SerializedEmbedding(embedding)
             self.identifier = Identifier.make(
                 engine: "naturallanguage",
                 model: "sentence-\(language.rawValue)",
@@ -89,10 +89,7 @@
             vectors.reserveCapacity(texts.count)
             for (index, text) in texts.enumerated() {
                 try Task.checkCancellation()
-                // The framework doesn't say that one embedding is safe to use from two threads.
-                let values = embedding.withLock {
-                    $0.vector(for: prefixes.apply(to: text, for: purpose))
-                }
+                let values = embedding.vector(for: prefixes.apply(to: text, for: purpose))
                 guard let values else { throw EmbeddingError.noVector(index: index) }
                 let vector = try Vectors.normalized(
                     values.map(Float.init),
@@ -102,6 +99,25 @@
                 vectors.append(vector)
             }
             return vectors
+        }
+    }
+
+    /// An `NLEmbedding` that one thread at a time uses.
+    ///
+    /// The framework doesn't say that `NLEmbedding` is `Sendable`
+    /// or that one embedding is safe to use from two threads.
+    /// This wrapper exposes only `vector(for:)`, and serializes it with a lock,
+    /// which is what makes its unchecked conformance sound.
+    private final class SerializedEmbedding: @unchecked Sendable {
+        private let lock = NSLock()
+        private let embedding: NLEmbedding
+
+        init(_ embedding: NLEmbedding) {
+            self.embedding = embedding
+        }
+
+        func vector(for string: String) -> [Double]? {
+            lock.withLock { embedding.vector(for: string) }
         }
     }
 #endif
