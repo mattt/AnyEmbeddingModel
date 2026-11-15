@@ -93,7 +93,7 @@
 
         /// Returns the parts of `error` that the tests compare,
         /// or `nil` if it isn't an ``HTTPTransportError``.
-        private func failure(_ error: (any Error)?) -> Failure? {
+        private func transportFailure(_ error: (any Error)?) -> Failure? {
             guard let error = error as? HTTPTransportError else { return nil }
             return Failure(
                 kind: error.kind,
@@ -107,10 +107,12 @@
             try await withServer(.error(status: 413, message: "Input is too long.")) { _, url in
                 let model = OpenAIEmbeddingModel(baseURL: url, apiKey: "", model: "m", dimension: 3)
                 let (error, _) = await errorText(model)
-                let failure = try #require(failure(error))
-                #expect(failure.kind == .httpError)
-                #expect(failure.status == 413)
-                #expect(failure.body?.contains("Input is too long.") == true)
+                // A local named like a function that a Testing macro calls
+                // shadows that function in Swift 6.3's expansion.
+                let reported = try #require(transportFailure(error))
+                #expect(reported.kind == .httpError)
+                #expect(reported.status == 413)
+                #expect(reported.body?.contains("Input is too long.") == true)
             }
         }
 
@@ -139,7 +141,7 @@
             let message = "Bad key \(Self.key). Rejected \(Self.key)."
             try await withServer(.error(status: 401, message: message)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(transportFailure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!text.contains(Self.key))
             }
         }
@@ -149,7 +151,7 @@
             let body = "\(Self.key) is invalid: \(Self.key)"
             try await withServer(.text(status: 403, body: body)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(failure(error) == Failure(kind: .httpError, status: 403, body: Self.withheld))
+                #expect(transportFailure(error) == Failure(kind: .httpError, status: 403, body: Self.withheld))
                 #expect(!text.contains(Self.key))
             }
         }
@@ -172,7 +174,7 @@
         func withholdsEncodedForms(body: String) async throws {
             try await withServer(.text(status: 401, body: body)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(transportFailure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!text.lowercased().contains("secret/one"))
                 #expect(!text.contains("%2"))
             }
@@ -185,7 +187,7 @@
                 let body = #"{"data": "\#(value)"}"#
                 try await withServer(.text(status: 200, body: body)) { _, url in
                     let (error, text) = await errorText(model(url))
-                    #expect(failure(error) == Failure(kind: .decodingError, body: Self.withheld))
+                    #expect(transportFailure(error) == Failure(kind: .decodingError, body: Self.withheld))
                     #expect((error as? HTTPTransportError)?.underlyingError == nil)
                     #expect(!text.contains(value))
                 }
@@ -197,12 +199,13 @@
             try await withServer(.text(status: 503, body: "Overloaded: 100% of capacity")) { _, url in
                 let (error, _) = await errorText(model(url))
                 #expect(
-                    failure(error) == Failure(kind: .httpError, status: 503, body: "Overloaded: 100% of capacity")
+                    transportFailure(error)
+                        == Failure(kind: .httpError, status: 503, body: "Overloaded: 100% of capacity")
                 )
             }
             try await withServer(.text(status: 200, body: #"{"data": "nope"}"#)) { _, url in
                 let (error, _) = await errorText(model(url))
-                #expect(failure(error) == Failure(kind: .decodingError, body: #"{"data": "nope"}"#))
+                #expect(transportFailure(error) == Failure(kind: .decodingError, body: #"{"data": "nope"}"#))
                 #expect((error as? HTTPTransportError)?.underlyingError is DecodingError)
             }
         }
@@ -212,7 +215,7 @@
             let headers = ["WWW-Authenticate": #"Bearer error="invalid", key="sk-secret/one+two""#]
             try await withServer(.text(status: 401, body: "denied", headers: headers)) { _, url in
                 let (error, text) = await errorText(model(url))
-                #expect(failure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(transportFailure(error) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect((error as? HTTPTransportError)?.response?.headerFields.isEmpty == true)
                 #expect(!text.contains(Self.key))
             }
@@ -223,7 +226,7 @@
             try await withServer(.text(status: 500, body: "sk-secret/one+two broke")) { _, url in
                 let (error, _) = await errorText(model(url, apiKey: ""))
                 #expect(
-                    failure(error) == Failure(kind: .httpError, status: 500, body: "sk-secret/one+two broke")
+                    transportFailure(error) == Failure(kind: .httpError, status: 500, body: "sk-secret/one+two broke")
                 )
             }
         }
@@ -302,10 +305,10 @@
             try await withServer(.echoAuthorization(status: 401)) { _, url in
                 let model = OpenAIEmbeddingModel(baseURL: url, apiKey: key(), model: "m", dimension: 3)
                 let (first, firstText) = await errorText(model)
-                #expect(failure(first) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(transportFailure(first) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!firstText.contains("sk-first-key"))
                 let (second, secondText) = await errorText(model)
-                #expect(failure(second) == Failure(kind: .httpError, status: 401, body: Self.withheld))
+                #expect(transportFailure(second) == Failure(kind: .httpError, status: 401, body: Self.withheld))
                 #expect(!secondText.contains("sk-second-key"))
             }
         }
