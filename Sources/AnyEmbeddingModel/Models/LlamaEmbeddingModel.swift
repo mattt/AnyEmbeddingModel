@@ -85,14 +85,15 @@
         ///
         /// llama.cpp has one log callback for the whole process,
         /// so this setting applies to every model.
-        /// AnyLanguageModel's `LlamaLanguageModel.logLevel` sets the same callback,
-        /// and the package that sets it last decides which messages appear.
+        /// The package installs its callback once, before it initializes llama.cpp,
+        /// because llama.cpp doesn't protect the callback against concurrent changes.
+        /// Setting this property changes only the level that the callback reads.
+        ///
+        /// AnyLanguageModel's `LlamaLanguageModel.logLevel` installs its own callback,
+        /// and the callback that was installed last decides which messages appear.
         public static var logLevel: LogLevel {
             get { LlamaRuntime.logLevel.withLock { $0 } }
-            set {
-                LlamaRuntime.logLevel.withLock { $0 = newValue }
-                llama_log_set(llamaLogCallback, nil)
-            }
+            set { LlamaRuntime.logLevel.withLock { $0 = newValue } }
         }
 
         /// The number of layers that a model offloads to the GPU by default.
@@ -361,7 +362,13 @@
 
         /// Initializes the llama.cpp backend once,
         /// and installs the log callback first,
-        /// so that loading the first model logs at the default level.
+        /// so that loading the first model logs at the current level.
+        ///
+        /// This is the only call to `llama_log_set`.
+        /// `llama.h` says that the logger state is global
+        /// and that its functions aren't thread-safe,
+        /// so the callback is installed before any other llama.cpp call
+        /// and never replaced.
         static let initialized: Void = {
             llama_log_set(llamaLogCallback, nil)
             llama_backend_init()

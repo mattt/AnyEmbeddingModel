@@ -249,8 +249,12 @@ such as AnyLanguageModel's `LlamaLanguageModel`, must be freed by that code.
 
 llama.cpp writes warnings and errors to standard error.
 Set `LlamaEmbeddingModel.logLevel` to change the level.
-The setting applies to the whole process,
-including AnyLanguageModel's `LlamaLanguageModel`.
+llama.cpp has one log callback for the whole process.
+The package installs its callback once, before its first load,
+and the level applies to every llama.cpp message after that.
+AnyLanguageModel's `LlamaLanguageModel` installs its own callback
+when you set its `logLevel`,
+and the callback installed last decides which messages appear.
 
 The llama.cpp binary framework has slices only for macOS and iOS devices,
 so the `Llama` trait doesn't build for the iOS Simulator,
