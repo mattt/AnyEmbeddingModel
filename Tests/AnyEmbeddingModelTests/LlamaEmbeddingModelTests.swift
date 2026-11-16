@@ -368,6 +368,30 @@
                 #expect(ContinuousClock.now - start < .seconds(LlamaLifecycle.exitDeadline))
             }
 
+            @Test("A log callback that exits while a model is freed doesn't hang the process")
+            func exitFromLogDuringCleanup() async {
+                // The handler sees that the cleanup's thread is exiting, and returns at once.
+                // The model is only partly freed, so ggml's assertion ends the process,
+                // as it would without the handler.
+                await #expect(processExitsWith: .signal(SIGABRT)) {
+                    let model = try await LlamaEmbeddingModelExitTests.loadedModel()
+                    let once = Locked(false)
+                    LlamaTestHooks.onLog.withLock {
+                        $0 = {
+                            let isFirst = once.withLock { done in
+                                defer { done = true }
+                                return !done
+                            }
+                            if isFirst { exit(0) }
+                        }
+                    }
+                    // Unloading frees the model, and llama.cpp logs while it frees.
+                    await model.removeFromCache()
+                    // A distinct status shows that llama.cpp logged nothing.
+                    exit(4)
+                }
+            }
+
             @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")
             func workAfterShutdown() async {
                 await #expect(processExitsWith: .success) {

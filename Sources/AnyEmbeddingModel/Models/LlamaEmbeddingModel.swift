@@ -437,6 +437,9 @@
         text: UnsafePointer<CChar>?,
         userData: UnsafeMutableRawPointer?
     ) {
+        #if DEBUG
+            LlamaTestHooks.onLog.withLock { $0 }?()
+        #endif
         let minimum = LlamaRuntime.logLevel.withLock { $0 }
         // A continuation of the previous message has no level of its own.
         guard minimum != .none, level != GGML_LOG_LEVEL_CONT else { return }
@@ -570,6 +573,13 @@
                 guard !isShuttingDown else { throw Self.exiting }
                 activeOperations += 1
             }
+            return try runCounted(body)
+        }
+
+        /// Runs `body` as work that the caller has already counted,
+        /// marks the current thread as running it,
+        /// and stops counting it when it returns.
+        private func runCounted<Result>(_ body: () throws -> Result) rethrows -> Result {
             // The body is synchronous, so it stays on this thread.
             let thread = Thread.current.threadDictionary
             let depth = thread[Self.depthKey] as? Int ?? 0
@@ -609,12 +619,21 @@
             condition.withLock { resources[ObjectIdentifier(model)] = model }
         }
 
-        /// Frees the resources of a model, unless ``shutDown()`` freed them already.
+        /// Frees the resources of a model, unless ``shutDown(deadline:)`` freed them already.
+        ///
+        /// The cleanup runs even while the process is exiting.
+        /// It counts as running work,
+        /// so that the exit handler's thread check and deadline apply to it,
+        /// and it calls llama.cpp without the lock:
+        /// llama.cpp logs while it frees a model,
+        /// and a log callback that calls `exit` runs the exit handler on this thread,
+        /// which takes the lock.
         func free(_ model: LlamaModelResources) {
             condition.withLock {
                 resources[ObjectIdentifier(model)] = nil
-                model.free()
+                activeOperations += 1
             }
+            runCounted { model.free() }
         }
 
         /// Stops new work, waits up to `deadline` for the work that is running,
@@ -622,7 +641,8 @@
         @discardableResult
         func shutDown(deadline: TimeInterval = exitDeadline) -> ShutdownResult {
             let insideOperation = isInsideOperation
-            return condition.withLock {
+            var models: [LlamaModelResources] = []
+            let result: ShutdownResult = condition.withLock {
                 guard !isShuttingDown else { return .alreadyShutDown }
                 isShuttingDown = true
                 // The operation on this thread can't end while its thread waits here.
@@ -633,12 +653,16 @@
                     guard condition.wait(until: end) else { break }
                 }
                 guard activeOperations == 0 else { return .timedOut }
-                for model in resources.values {
-                    model.free()
-                }
+                models = Array(resources.values)
                 resources = [:]
                 return .freed
             }
+            // Free without the lock, as in `free(_:)`.
+            // If a log callback calls `exit` here, this handler runs again and does nothing.
+            for model in models {
+                model.free()
+            }
+            return result
         }
     }
 
@@ -650,6 +674,10 @@
         enum LlamaTestHooks {
             /// Runs before each call to `llama_decode`, on the embedding's thread.
             static let beforeDecode = Locked<(@Sendable () -> Void)?>(nil)
+
+            /// Runs for each llama.cpp log message, before the level filter,
+            /// on the thread that logs it.
+            static let onLog = Locked<(@Sendable () -> Void)?>(nil)
         }
     #endif
 
@@ -690,15 +718,18 @@
         /// Call it only through ``LlamaLifecycle``,
         /// when no load or embedding uses the model.
         func free() {
-            lock.withLock {
-                guard !isFreed else { return }
+            // Take the context under the lock, and call llama.cpp without it.
+            let (isFirst, context): (Bool, OpaquePointer?) = lock.withLock {
+                guard !isFreed else { return (false, nil) }
                 isFreed = true
-                if let cachedContext {
-                    llama_free(cachedContext.context)
-                }
-                cachedContext = nil
-                llama_model_free(model)
+                defer { cachedContext = nil }
+                return (true, cachedContext?.context)
             }
+            guard isFirst else { return }
+            if let context {
+                llama_free(context)
+            }
+            llama_model_free(model)
         }
 
         /// Puts a new context in the cache.
@@ -723,22 +754,23 @@
         /// Returns a context to the cache,
         /// or frees it if it isn't the cached context and the cache already has one.
         func checkIn(_ context: OpaquePointer, settings: ContextSettings) {
-            let free: Bool = lock.withLock {
+            // Choose the context to free under the lock, and call llama.cpp without it.
+            let unused: OpaquePointer? = lock.withLock {
                 if cachedContext?.context == context {
                     cachedContext?.isCheckedOut = false
-                    return false
+                    return nil
                 }
-                if let entry = cachedContext {
+                let previous = cachedContext
+                if let previous {
                     // Keep the context of the most recent settings,
                     // unless another embedding is using the cached one.
-                    guard !entry.isCheckedOut, entry.settings != settings else { return true }
-                    llama_free(entry.context)
+                    guard !previous.isCheckedOut, previous.settings != settings else { return context }
                 }
                 cachedContext = CachedContext(context: context, settings: settings, isCheckedOut: false)
-                return false
+                return previous?.context
             }
-            if free {
-                llama_free(context)
+            if let unused {
+                llama_free(unused)
             }
         }
     }
