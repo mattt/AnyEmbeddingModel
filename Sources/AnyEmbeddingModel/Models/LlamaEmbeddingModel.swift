@@ -317,11 +317,12 @@
         /// llama.cpp couldn't create a context for the model.
         case contextInitializationFailed
 
-        /// The model has no pooling type, or pools to a score,
-        /// so it doesn't produce one vector for each text.
+        /// The model's pooling type doesn't produce one vector for each text.
         ///
+        /// The model accepts mean, CLS, and last-token pooling.
         /// A model that generates text has no pooling type,
-        /// and a reranker pools to a score.
+        /// so llama.cpp returns a vector for each token,
+        /// and a reranker uses rank pooling, which returns a score.
         case notEmbeddingModel
 
         /// The model has an encoder and a decoder, such as T5,
@@ -343,7 +344,7 @@
             case .contextInitializationFailed:
                 "Failed to initialize context"
             case .notEmbeddingModel:
-                "This model has no pooling type, so it isn't an embedding model"
+                "This model doesn't pool each text into one vector, so it isn't an embedding model"
             case .encoderDecoderModel:
                 "This model has an encoder and a decoder, and llama.cpp can't embed text with it"
             case .tokenizationFailed:

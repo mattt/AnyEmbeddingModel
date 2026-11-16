@@ -223,8 +223,10 @@ The identifier uses `name` and `version`, not the path.
 Change `version` whenever the file changes.
 
 llama.cpp pools each text with the pooling type in the file's metadata.
-A file without one, such as a model that generates text,
-and a reranker fail to load with `LlamaEmbeddingModelError.notEmbeddingModel`.
+The model accepts mean, CLS, and last-token pooling.
+Other files fail to load with `LlamaEmbeddingModelError.notEmbeddingModel`:
+a model that generates text has no pooling type,
+and a reranker uses rank pooling, which returns a score.
 GGUF files don't record a model's query and document prefixes,
 so set `prefixes` to match the model.
 
