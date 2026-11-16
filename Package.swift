@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
-        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.24.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.26.0"),
         .package(url: "https://github.com/apple/swift-http-types", from: "1.5.0"),
     ],
     targets: [
