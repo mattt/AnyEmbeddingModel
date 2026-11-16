@@ -26,12 +26,22 @@
     ///
     /// Copies of a model share one loaded copy of its weights.
     ///
-    /// When the process exits normally,
-    /// the package waits for running loads and embeddings
-    /// to reach their next call to llama.cpp,
-    /// and frees every model that it loaded,
-    /// because ggml's Metal backend stops a process that exits with a model on the GPU.
-    /// After that, loads and embeddings throw ``EmbeddingError/Kind/unavailable``.
+    /// ggml's Metal backend stops a process with an assertion
+    /// if the process exits while a model is still loaded on the GPU.
+    /// The package tries to prevent this in an exit handler,
+    /// which stops new work, waits a short time for running work,
+    /// and frees the models that it loaded if no work is still running.
+    /// The handler can't help in these cases,
+    /// and the process can still stop with the assertion:
+    ///
+    /// - An exit during the first load,
+    ///   because the handler is registered when a load ends.
+    /// - An exit from inside a llama.cpp call or callback.
+    /// - Work that is still running after ``LlamaLifecycle/exitDeadline``.
+    /// - An exit that runs no exit handlers, such as `_exit` or a crash.
+    ///
+    /// To be certain that no model is loaded when the process exits,
+    /// call ``removeAllFromCache()`` and let running embeddings end first.
     ///
     /// The package can't tell whether a file has changed,
     /// so ``version`` is your promise:
@@ -273,6 +283,11 @@
         ///
         /// Models that exist already observe the removal,
         /// and their next embedding loads the weights again.
+        /// An embedding that is running keeps its model's weights until it ends.
+        ///
+        /// Call this method, after running embeddings end,
+        /// to be certain that no model is loaded when the process exits.
+        /// The package's exit handler is best effort; see ``LlamaEmbeddingModel``.
         public static func removeAllFromCache() async {
             LlamaLoaderRegistry.unloadAll()
         }
@@ -375,7 +390,7 @@
             llama_backend_init()
         }()
 
-        /// Registers ``LlamaLifecycle/shutDown()`` to run when the process exits.
+        /// Registers ``LlamaLifecycle/shutDown(deadline:)`` to run when the process exits.
         ///
         /// ggml creates static objects as it needs them,
         /// such as its Metal device and buffer types during a model's first load,
@@ -383,11 +398,22 @@
         /// in the reverse order of the exit handlers and static objects that came before.
         /// A handler runs before the objects created before its registration are destroyed,
         /// but after the objects created later.
+        /// An earlier registration, before the first load, ran after ggml's objects were destroyed
+        /// and crashed in `llama_free`.
+        ///
+        /// ggml doesn't report when it creates such an object,
+        /// so the package can't tell whether an earlier registration still runs early enough.
         /// So every load registers the handler again when it ends,
-        /// and the last registration runs first, while every object that a model uses exists.
-        /// The handler does nothing after its first run.
+        /// and so does each model's first embedding, which compiles ggml's GPU kernels.
+        /// The last registration runs first, and the handler does nothing after its first run.
+        ///
+        /// If a registration fails,
+        /// an earlier one could run after objects that the models use are destroyed,
+        /// so the handler then frees nothing.
         static func registerExitHandler() {
-            atexit { LlamaLifecycle.shared.shutDown() }
+            if atexit({ _ = LlamaLifecycle.shared.shutDown() }) != 0 {
+                LlamaLifecycle.shared.exitHandlerRegistrationFailed()
+            }
         }
     }
 
@@ -439,7 +465,7 @@
     // MARK: - Lifecycle
 
     /// Tracks the llama.cpp work in this process,
-    /// and frees every model when the process exits.
+    /// and tries to free every model when the process exits.
     ///
     /// ggml's Metal backend frees its device in a C++ static destructor at exit,
     /// and it stops the process with an assertion
@@ -447,26 +473,77 @@
     /// Plain llama.cpp calls do the same
     /// when a process exits with a model loaded on the GPU.
     /// The loader registry keeps models for as long as the process runs,
-    /// so the package frees them in an exit handler.
+    /// so the package tries to free them in an exit handler.
     ///
-    /// The handler, which every load registers,
-    /// stops new loads and embeddings,
-    /// waits for the ones that are running,
-    /// and frees the model and the cached context of every model that is still loaded,
+    /// The handler is best effort.
+    /// It must never make an exit worse than an exit without it,
+    /// so it never waits without a limit,
+    /// and it never frees a model or a context that a running call could use.
+    /// It stops new loads and embeddings,
+    /// and it waits up to ``exitDeadline`` for the ones that are running:
+    /// a load stops at its next progress report,
+    /// and an embedding stops before its next call to llama.cpp.
+    /// If no work is running then,
+    /// it frees the model and the cached context of every model that is still loaded,
     /// including models that Swift objects still hold.
-    /// A running load stops at its next progress report,
-    /// and a running embedding stops before its next call to llama.cpp,
-    /// so the wait lasts about one call.
-    /// After the handler runs, every load and embedding throws
+    /// Otherwise it frees nothing.
+    /// Freeing only the idle models wouldn't help,
+    /// because the busy model's buffers would still cause the assertion.
+    ///
+    /// The handler can't help, and the assertion can still happen,
+    /// in these cases:
+    ///
+    /// - An exit during the first load or its first context,
+    ///   because the handler is registered when a load ends.
+    ///   An earlier registration would run after ggml's objects are destroyed.
+    /// - An exit from inside a llama.cpp call or callback.
+    ///   The handler sees that its thread is running an operation
+    ///   and returns without waiting.
+    /// - Work that is still running at the deadline.
+    /// - An exit that runs no exit handlers, such as `_exit` or a crash.
+    ///
+    /// After the handler starts, every load and embedding throws
     /// ``EmbeddingError/Kind/unavailable``.
     final class LlamaLifecycle: @unchecked Sendable {
         static let shared = LlamaLifecycle()
 
+        /// How long the exit handler waits for running loads and embeddings.
+        ///
+        /// A running embedding stops before its next call to llama.cpp,
+        /// so the wait is about one call:
+        /// one batch of at most ``LlamaEmbeddingModel/maximumBatchSize`` texts,
+        /// which takes milliseconds for the test model.
+        /// Three seconds leaves room for one batch of a much larger model,
+        /// and still ends a process that can't finish its work
+        /// soon enough that the delay looks like a slow quit, not a hang.
+        static let exitDeadline: TimeInterval = 3
+
+        /// What ``shutDown(deadline:)`` did.
+        enum ShutdownResult: Equatable {
+            /// It freed every model.
+            case freed
+            /// It had already run, so it did nothing.
+            case alreadyShutDown
+            /// It ran on a thread inside an operation, so it freed nothing without waiting.
+            case insideOperation
+            /// Work was still running at the deadline, so it freed nothing.
+            case timedOut
+            /// A registration of the exit handler failed, so it freed nothing.
+            case registrationFailed
+        }
+
+        /// The key in a thread's dictionary for the number of operations that the thread runs.
+        private static let depthKey = "AnyEmbeddingModel.LlamaLifecycle.operationDepth"
+
         /// Guards the properties below, and signals when no operation is running.
         private let condition = NSCondition()
         private var isShuttingDown = false
+        private var registrationFailed = false
         private var activeOperations = 0
         private var resources: [ObjectIdentifier: LlamaModelResources] = [:]
+
+        /// A function that an embedding calls before each call to llama.cpp, for tests.
+        let beforeDecode = Locked<(@Sendable () -> Void)?>(nil)
 
         /// Whether the process is exiting.
         var isStopping: Bool {
@@ -485,13 +562,28 @@
                 guard !isShuttingDown else { throw Self.exiting }
                 activeOperations += 1
             }
+            // The body is synchronous, so it stays on this thread.
+            let thread = Thread.current.threadDictionary
+            let depth = thread[Self.depthKey] as? Int ?? 0
+            thread[Self.depthKey] = depth + 1
             defer {
+                thread[Self.depthKey] = depth
                 condition.withLock {
                     activeOperations -= 1
                     if activeOperations == 0 { condition.broadcast() }
                 }
             }
             return try body()
+        }
+
+        /// Whether the current thread is running an operation.
+        private var isInsideOperation: Bool {
+            (Thread.current.threadDictionary[Self.depthKey] as? Int ?? 0) > 0
+        }
+
+        /// Records that a registration of the exit handler failed.
+        func exitHandlerRegistrationFailed() {
+            condition.withLock { registrationFailed = true }
         }
 
         /// The error that work throws after the exit handler starts.
@@ -512,18 +604,27 @@
             }
         }
 
-        /// Stops new work, waits for the work that is running,
-        /// and frees the resources of every model.
-        func shutDown() {
-            condition.withLock {
+        /// Stops new work, waits up to `deadline` for the work that is running,
+        /// and frees the resources of every model if no work is running then.
+        @discardableResult
+        func shutDown(deadline: TimeInterval = exitDeadline) -> ShutdownResult {
+            let insideOperation = isInsideOperation
+            return condition.withLock {
+                guard !isShuttingDown else { return .alreadyShutDown }
                 isShuttingDown = true
+                // The operation on this thread can't end while its thread waits here.
+                guard !insideOperation else { return .insideOperation }
+                guard !registrationFailed else { return .registrationFailed }
+                let end = Date(timeIntervalSinceNow: deadline)
                 while activeOperations > 0 {
-                    condition.wait()
+                    guard condition.wait(until: end) else { break }
                 }
+                guard activeOperations == 0 else { return .timedOut }
                 for model in resources.values {
                     model.free()
                 }
                 resources = [:]
+                return .freed
             }
         }
     }
@@ -644,6 +745,9 @@
 
         /// The context length that the model was trained with, or `nil` if the file doesn't say.
         let trainedContextLength: Int?
+
+        /// Whether an embedding has run, which registers the exit handler again.
+        private let hasEmbedded = Locked(false)
 
         /// Loads the model and checks that it produces one vector for each text.
         init(path: String, gpuLayers: Int32, settings: ContextSettings) throws {
@@ -785,6 +889,13 @@
                 if LlamaLifecycle.shared.isStopping { throw LlamaLifecycle.exiting }
                 vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
             }
+            let isFirstEmbedding = hasEmbedded.withLock { hasEmbedded in
+                defer { hasEmbedded = true }
+                return !hasEmbedded
+            }
+            if isFirstEmbedding {
+                LlamaRuntime.registerExitHandler()
+            }
             return vectors
         }
 
@@ -837,6 +948,7 @@
             if let memory = llama_get_memory(context) {
                 llama_memory_clear(memory, true)
             }
+            LlamaLifecycle.shared.beforeDecode.withLock { $0 }?()
             // llama_decode runs the encoder for a model without a cache, such as BERT.
             guard llama_decode(context, batch) == 0 else {
                 throw LlamaEmbeddingModelError.decodingFailed

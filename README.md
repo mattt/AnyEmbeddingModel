@@ -241,13 +241,25 @@ to release them.
 ggml's Metal backend stops a process with an assertion
 if the process exits while a model is still loaded on the GPU,
 even when the process uses llama.cpp directly.
-So when the process exits normally, the package stops new loads and embeddings,
-waits for the ones that are running to reach their next call to llama.cpp,
-and frees every model that it loaded.
-This covers only models that this package loads,
-and only an exit that runs exit handlers, such as `exit()` or a return from `main`.
-Models that other code loads with llama.cpp,
-such as AnyLanguageModel's `LlamaLanguageModel`, must be freed by that code.
+The package tries to prevent this with an exit handler.
+The handler stops new loads and embeddings,
+waits up to three seconds for running ones to reach their next call to llama.cpp,
+and then frees every model that the package loaded.
+If work is still running at that time, the handler frees nothing,
+so the process ends as it would without the handler.
+The handler can't help in these cases:
+
+- An exit during the first load,
+  because the handler is registered when a load ends.
+- An exit from inside a llama.cpp call or callback.
+- Work that is still running after three seconds.
+- An exit that runs no exit handlers, such as `_exit` or a crash.
+- Models that other code loads with llama.cpp,
+  such as AnyLanguageModel's `LlamaLanguageModel`.
+
+To be certain that no model is loaded when the process exits,
+call `LlamaEmbeddingModel.removeAllFromCache()`
+after running embeddings end, and before the exit.
 
 llama.cpp writes warnings and errors to standard error.
 Set `LlamaEmbeddingModel.logLevel` to change the level.
