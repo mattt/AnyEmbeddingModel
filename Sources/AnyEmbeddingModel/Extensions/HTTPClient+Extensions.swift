@@ -9,7 +9,7 @@
     ///
     /// A client follows redirects as its configuration says,
     /// and a request can't change that,
-    /// so this transport keeps redirects within the request's origin in two ways.
+    /// so this transport limits redirects to other origins in two ways.
     /// It sends the body as a sequence that can be read only once,
     /// and a client doesn't follow a redirect that would send the body again, such as a 307 or 308:
     /// it returns that redirect response instead.

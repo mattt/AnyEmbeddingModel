@@ -226,9 +226,15 @@ By default, `makeDefaultTransport()` returns a `URLSession`,
 or an AsyncHTTPClient client when the `AsyncHTTPClient` trait is enabled.
 Pass `transport:` to use another `URLSession`, an `HTTPClient`,
 or your own type that conforms to `HTTPTransport`.
-A transport must not follow a redirect that changes the scheme, host, or port,
-so that the API key and the texts never reach another server.
-The package's `URLSession` and `HTTPClient` transports return such a redirect as an error response.
+A transport must not follow a redirect that changes the scheme, host, or port.
+The package's `URLSession` transport, and the AsyncHTTPClient client
+that `makeDefaultTransport()` returns, follow no such redirect:
+they return it as an error response, so the API key and the texts stay with the server.
+An `HTTPClient` that you pass yourself follows redirects as its configuration says.
+It never resends the body to another server,
+but it can follow a redirect that drops the body, such as a 303,
+to another server as a `GET` with no body and no `Authorization` header;
+the model then throws an error rather than read that server's response.
 
 If the server rejects a request, the model throws `HTTPTransportError`
 with the response and its body.

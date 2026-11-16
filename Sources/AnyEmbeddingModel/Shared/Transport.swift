@@ -32,10 +32,19 @@ public protocol HTTPTransport: Sendable {
     ///   once it returns, the request is over, and the body can't be read anymore.
     /// - A transport that retries a request doesn't retry it
     ///   once it has passed a response to `responseHandler`.
-    /// - It doesn't follow a redirect that changes the scheme, the host, or the port,
-    ///   so that no request, credential, or body reaches another origin.
+    /// - It doesn't follow a redirect that changes the scheme, the host, or the port.
     ///   It passes the redirect response to `responseHandler` instead,
     ///   or throws without calling it.
+    ///
+    /// The package's `URLSession` transport keeps every part of this contract.
+    /// AsyncHTTPClient's `HTTPClient` follows redirects as its own configuration says,
+    /// and the transport can't change that for a client that you supply.
+    /// Such a client never resends the body to another origin,
+    /// but it can follow a redirect that drops the body, such as a 303,
+    /// to another origin as a `GET` with no body and no `Authorization` header;
+    /// the transport then throws rather than pass that response on.
+    /// The client that ``makeDefaultTransport()`` returns follows no redirects,
+    /// so it keeps the whole contract.
     ///
     /// - Parameters:
     ///   - request: The request to send.
