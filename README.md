@@ -30,8 +30,8 @@ Three backends are available:
 
 ## Requirements
 
-- Swift 6.2 or later
-- macOS 14, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
+- Swift 6.3+ (Xcode 26.4+)
+- macOS 14, Mac Catalyst 17, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
 - For MLX, Apple silicon and the Metal toolchain; watchOS is not supported.
 
 ## Installation
@@ -44,10 +44,15 @@ dependencies: [
 ]
 ```
 
-Without traits, the package requires no third-party dependencies
-and provides the NaturalLanguage and OpenAI backends.
-Enable the `MLX` trait to add `MLXEmbeddingModel`
-and its dependencies, mlx-swift-lm, swift-transformers, and swift-huggingface:
+Without traits, the package provides the NaturalLanguage and OpenAI backends,
+and its only dependency is Apple's
+[swift-http-types](https://github.com/apple/swift-http-types).
+Each trait adds a feature and its dependencies:
+
+| Trait | Feature | Dependencies |
+| --- | --- | --- |
+| `MLX` | `MLXEmbeddingModel` | mlx-swift-lm, swift-transformers, swift-huggingface |
+| `AsyncHTTPClient` | AsyncHTTPClient as the default transport for `OpenAIEmbeddingModel` | async-http-client |
 
 ```swift
 .package(
@@ -155,6 +160,20 @@ to avoid that lookup next time.
 Loading still requires the model files.
 If the branch moves, a new call to `resolving` returns a different identifier.
 
+Copies of a model share one loaded copy of its weights.
+Call `removeFromCache()` to release a model's weights,
+or `MLXEmbeddingModel.removeAllFromCache()` to release every model's weights.
+The next embedding loads them again.
+
+While a model loads or embeds,
+MLX keeps freed GPU buffers in a cache for reuse, up to a limit.
+Pass `gpuMemory:` to set the limits for active and idle periods.
+The default, `.automatic`, scales the active limit with the device's memory
+and keeps the idle limit small;
+`.unconstrained` leaves the cache effectively unlimited.
+`removeFromCache()` also clears the cache when no model is loading or embedding,
+unless the configuration says not to.
+
 To load files from disk, use `init(directory:name:version:dimension:)`.
 Change `version` whenever the files change,
 and do not change files while that version is in use.
@@ -181,19 +200,55 @@ import Foundation
 
 let model = OpenAIEmbeddingModel(
     baseURL: URL(string: "http://localhost:8080/v1")!,
+    apiKey: "",
     model: "BAAI/bge-small-en-v1.5",
     dimension: 384,
     prefixes: .bge
 )
 ```
 
-Pass `apiKey` if the server requires a bearer token.
+`baseURL` defaults to `OpenAIEmbeddingModel.defaultBaseURL`, OpenAI's API.
+`apiKey` takes a `String` expression, such as a string literal or a function call.
+The parameter is an autoclosure,
+so the model evaluates the expression again, once for each request,
+and a function that returns the current key picks up a rotated key:
+
+```swift
+let model = OpenAIEmbeddingModel(
+    apiKey: currentAPIKey(),  // Called again for each request.
+    model: "text-embedding-3-small",
+    dimension: 1536
+)
+```
+
+An empty key sends no `Authorization` header.
+If an error response might contain the key,
+the model withholds the server's text from the error.
 The backend adds `prefixes` before sending each text.
 If the server supports shorter vectors,
 set `requestsDimension: true` to send `dimension` in the request.
 
 The client cannot detect when a server changes the model behind a name.
 Change `revision` when this happens so that the identifier changes too.
+
+The model sends its requests through an `HTTPTransport`,
+the same protocol that AnyLanguageModel uses.
+By default, `makeDefaultTransport()` returns a `URLSession`,
+or an AsyncHTTPClient client when the `AsyncHTTPClient` trait is enabled.
+Pass `transport:` to use another `URLSession`, an `HTTPClient`,
+or your own type that conforms to `HTTPTransport`.
+A transport must not follow a redirect that changes the scheme, host, or port.
+The package's `URLSession` transport, and the AsyncHTTPClient client
+that `makeDefaultTransport()` returns, follow no such redirect:
+they return it as an error response, so the API key and the texts stay with the server.
+An `HTTPClient` that you pass yourself follows redirects as its configuration says.
+It never resends the body to another server,
+but it can follow a redirect that drops the body, such as a 303,
+to another server as a `GET` with no body and no `Authorization` header;
+the model then throws an error rather than read that server's response.
+
+If the server rejects a request, the model throws `HTTPTransportError`
+with the response and its body.
 
 ## Limitations
 
@@ -212,16 +267,34 @@ and its tests run on macOS:
 
 | Command | Description |
 | --- | --- |
+| `mise run setup` | Resolve the dependencies of the package and of every trait. |
+| `mise run build` | Build the library without traits. |
+| `mise run build:mlx` | Build the library with the `MLX` trait. |
+| `mise run build:ios` | Compile the library for iOS with `xcodebuild`. |
+| `mise run lint` | Check the formatting and lint rules. |
+| `mise run format` | Format the Swift sources in place. |
 | `mise run test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
 | `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
 | `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
 
+The build and test tasks read `Package.resolved` without changing it,
+because a resolution without a trait would drop that trait's dependencies from the file.
+After you change a dependency, run `mise run setup` to update the file.
+
+To run the tests with AsyncHTTPClient as the default transport,
+run `mise run test -- --traits AsyncHTTPClient`.
+
+The MLX tasks look for the Metal compiler in the downloaded Metal toolchain
+when `xcrun` cannot find it,
+and stop with the command that downloads it if it is missing.
 The `test:mlx` task uses Swift Build and has been run with Swift 6.4.
 It copies `default.metallib` from the MLX bundle
 beside the test binary as `mlx.metallib`, where the test process can find it.
 It removes the copy after the run
 so that it does not invalidate the test bundle's signature on the next build.
 The task stops with an error if the toolchain cannot produce the library.
+Tests that start MLX's Metal device run only in this task,
+because MLX stops a process that cannot find the library.
 
 The real-model tests download model files as needed.
 One test also asks the Hub whether each preset's commit exists.
@@ -230,5 +303,5 @@ with pinned package versions.
 
 ## License
 
-AnyEmbeddingModel is available under the MIT license.
-See [LICENSE.md](LICENSE.md) for details.
+AnyEmbeddingModel is available under the Apache License 2.0.
+See [LICENSE](LICENSE) for details.

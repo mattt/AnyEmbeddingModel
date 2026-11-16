@@ -24,87 +24,89 @@
 ///   Callers pass the plain text.
 /// - ``identifier`` changes whenever a vector for the same text and purpose could change.
 public protocol EmbeddingModel: Sendable {
-  /// The type that describes why the model can't embed text now.
-  ///
-  /// A model that is always available uses `Never`.
-  associatedtype UnavailableReason: Sendable = Never
+    /// The type that describes why the model can't embed text now.
+    ///
+    /// A model that is always available uses `Never`.
+    associatedtype UnavailableReason: Sendable = Never
 
-  /// A string that identifies the vectors that this model produces.
-  ///
-  /// Two models with the same identifier
-  /// return the same vectors for the same text and purpose,
-  /// within floating-point error.
-  /// The identifier includes the engine, the model, its revision,
-  /// the dimension, and every setting that changes vectors,
-  /// such as prefixes and truncation.
-  /// Store it with saved vectors,
-  /// and embed the texts again when it changes.
-  ///
-  /// An identifier is ASCII text with five fields, separated by slashes:
-  /// the engine, the model, the revision, the dimension, and a fingerprint of the other settings.
-  /// For example:
-  /// `mlx/BAAI%2Fbge-small-en-v1.5/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/384/17ad23889b01fd7d`.
-  /// Each field is the percent-encoding of its UTF-8 bytes,
-  /// and a revision of `-` means that the model has none.
-  ///
-  /// Identity is by bytes, with no Unicode normalization:
-  /// composed and decomposed forms of the same text give different identifiers,
-  /// because they can give different vectors.
-  var identifier: String { get }
+    /// A string that identifies the vectors that this model produces.
+    ///
+    /// Two models with the same identifier
+    /// return the same vectors for the same text and purpose,
+    /// within floating-point error.
+    /// The identifier includes the engine, the model, its revision,
+    /// the dimension, and every setting that changes vectors,
+    /// such as prefixes and truncation.
+    /// Store it with saved vectors,
+    /// and embed the texts again when it changes.
+    ///
+    /// An identifier is ASCII text with five fields, separated by slashes:
+    /// the engine, the model, the revision, the dimension, and a fingerprint of the other settings.
+    /// For example:
+    /// `mlx/BAAI%2Fbge-small-en-v1.5/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/384/17ad23889b01fd7d`.
+    /// Each field is the percent-encoding of its UTF-8 bytes,
+    /// and a revision of `-` means that the model has none.
+    /// The fingerprint is a 64-bit hash,
+    /// so two different sets of settings can share it, though that is unlikely.
+    ///
+    /// Identity is by bytes, with no Unicode normalization:
+    /// composed and decomposed forms of the same text give different identifiers,
+    /// because they can give different vectors.
+    var identifier: String { get }
 
-  /// The number of elements in each vector.
-  var dimension: Int { get }
+    /// The number of elements in each vector.
+    var dimension: Int { get }
 
-  /// Whether the model can embed text now.
-  var availability: Availability<UnavailableReason> { get }
+    /// Whether the model can embed text now.
+    var availability: Availability<UnavailableReason> { get }
 
-  /// Loads the model and its resources before the first embedding.
-  ///
-  /// The batch `embed(_:for:)` loads the model if it isn't loaded,
-  /// so you don't have to call this method.
-  /// Call it to move the cost of a download or a load
-  /// to a time that you choose.
-  func prewarm() async throws
+    /// Loads the model and its resources before the first embedding.
+    ///
+    /// The batch `embed(_:for:)` loads the model if it isn't loaded,
+    /// so you don't have to call this method.
+    /// Call it to move the cost of a download or a load
+    /// to a time that you choose.
+    func prewarm() async throws
 
-  /// Returns a vector for each text.
-  ///
-  /// - Parameters:
-  ///   - texts: The texts to embed.
-  ///     An empty array returns an empty array.
-  ///   - purpose: Whether the texts are queries or documents.
-  /// - Returns: One unit vector of ``dimension`` elements for each text,
-  ///   in the order of `texts`.
-  /// - Throws: ``EmbeddingError/emptyText(index:)``
-  ///   if a text contains only whitespace,
-  ///   or another ``EmbeddingError`` or an engine error if the model fails.
-  ///   If the model can't embed one text, it throws and returns no vectors.
-  func embed(_ texts: [String], for purpose: EmbeddingPurpose) async throws -> [[Float]]
+    /// Returns a vector for each text.
+    ///
+    /// - Parameters:
+    ///   - texts: The texts to embed.
+    ///     An empty array returns an empty array.
+    ///   - purpose: Whether the texts are queries or documents.
+    /// - Returns: One unit vector of ``dimension`` elements for each text,
+    ///   in the order of `texts`.
+    /// - Throws: ``EmbeddingError/Kind/emptyText``
+    ///   if a text contains only whitespace,
+    ///   or another ``EmbeddingError`` or an engine error if the model fails.
+    ///   If the model can't embed one text, it throws and returns no vectors.
+    func embed(_ texts: [String], for purpose: EmbeddingPurpose) async throws -> [[Float]]
 }
 
 extension EmbeddingModel {
-  /// Returns the vector for one text.
-  ///
-  /// - Parameters:
-  ///   - text: The text to embed.
-  ///   - purpose: Whether the text is a query or a document.
-  public func embed(_ text: String, for purpose: EmbeddingPurpose) async throws -> [Float] {
-    let vectors = try await embed([text], for: purpose)
-    guard let vector = vectors.first, vectors.count == 1 else {
-      throw EmbeddingError.wrongVectorCount(expected: 1, actual: vectors.count)
+    /// Returns the vector for one text.
+    ///
+    /// - Parameters:
+    ///   - text: The text to embed.
+    ///   - purpose: Whether the text is a query or a document.
+    public func embed(_ text: String, for purpose: EmbeddingPurpose) async throws -> [Float] {
+        let vectors = try await embed([text], for: purpose)
+        guard let vector = vectors.first, vectors.count == 1 else {
+            throw EmbeddingError.wrongVectorCount(expected: 1, actual: vectors.count)
+        }
+        return vector
     }
-    return vector
-  }
 
-  /// A Boolean value that indicates whether the model can embed text now.
-  public var isAvailable: Bool {
-    if case .available = availability { true } else { false }
-  }
+    /// A Boolean value that indicates whether the model can embed text now.
+    public var isAvailable: Bool {
+        if case .available = availability { true } else { false }
+    }
 
-  /// Does nothing, for a model that has nothing to load.
-  public func prewarm() async throws {}
+    /// Does nothing, for a model that has nothing to load.
+    public func prewarm() async throws {}
 }
 
 extension EmbeddingModel where UnavailableReason == Never {
-  /// Returns ``Availability/available``, for a model that is always available.
-  public var availability: Availability<UnavailableReason> { .available }
+    /// Returns ``Availability/available``, for a model that is always available.
+    public var availability: Availability<UnavailableReason> { .available }
 }

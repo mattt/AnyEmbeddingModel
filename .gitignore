@@ -3,4 +3,4 @@
 .swiftpm/
 xcuserdata/
 DerivedData/
-/Package.resolved
+.netrc
