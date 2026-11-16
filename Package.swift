@@ -21,6 +21,10 @@ let package = Package(
             description: "Enables MLXEmbeddingModel, which runs embedding models with MLX."
         ),
         .trait(
+            name: "Llama",
+            description: "Enables LlamaEmbeddingModel, which runs GGUF embedding models with llama.cpp."
+        ),
+        .trait(
             name: "AsyncHTTPClient",
             description: "Sends OpenAIEmbeddingModel's requests with AsyncHTTPClient by default."
         ),
