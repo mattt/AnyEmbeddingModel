@@ -277,6 +277,10 @@ and its tests run on macOS:
 | `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
 | `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
 
+The build and test tasks read `Package.resolved` without changing it,
+because a resolution without a trait would drop that trait's dependencies from the file.
+After you change a dependency, run `mise run setup` to update the file.
+
 To run the tests with AsyncHTTPClient as the default transport,
 run `mise run test -- --traits AsyncHTTPClient`.
 
