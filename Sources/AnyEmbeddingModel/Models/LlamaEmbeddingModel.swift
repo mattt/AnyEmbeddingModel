@@ -26,6 +26,13 @@
     ///
     /// Copies of a model share one loaded copy of its weights.
     ///
+    /// When the process exits normally,
+    /// the package waits for running loads and embeddings
+    /// to reach their next call to llama.cpp,
+    /// and frees every model that it loaded,
+    /// because ggml's Metal backend stops a process that exits with a model on the GPU.
+    /// After that, loads and embeddings throw ``EmbeddingError/Kind/unavailable``.
+    ///
     /// The package can't tell whether a file has changed,
     /// so ``version`` is your promise:
     /// change it whenever you change the file,
@@ -217,7 +224,9 @@
             )
             self.loaderKey = key
             self.loader = LlamaLoaderRegistry.loader(for: key) {
-                try LlamaEmbeddingEngine(path: modelPath, gpuLayers: gpuLayers, settings: settings)
+                try LlamaLifecycle.shared.perform {
+                    try LlamaEmbeddingEngine(path: modelPath, gpuLayers: gpuLayers, settings: settings)
+                }
             }
         }
 
@@ -277,7 +286,8 @@
             let engine = try await loader.container()
             try Task.checkCancellation()
             let inputs = texts.map { prefixes.apply(to: $0, for: purpose) }
-            let vectors = try engine.embed(inputs, settings: contextSettings)
+            let settings = contextSettings
+            let vectors = try LlamaLifecycle.shared.perform { try engine.embed(inputs, settings: settings) }
             return try Vectors.normalized(vectors, count: texts.count, dimension: dimension)
         }
 
@@ -286,8 +296,9 @@
         func tokenIDs(for texts: [String], purpose: EmbeddingPurpose) async throws -> [[Int32]] {
             let engine = try await loader.container()
             let limit = engine.tokenLimit(for: contextSettings)
-            return try texts.map {
-                try engine.tokenize(prefixes.apply(to: $0, for: purpose), limit: limit)
+            let inputs = texts.map { prefixes.apply(to: $0, for: purpose) }
+            return try LlamaLifecycle.shared.perform {
+                try inputs.map { try engine.tokenize($0, limit: limit) }
             }
         }
     }
@@ -356,20 +367,20 @@
             llama_backend_init()
         }()
 
-        /// Unloads every model when the process exits.
+        /// Registers ``LlamaLifecycle/shutDown()`` to run when the process exits.
         ///
-        /// ggml's Metal backend stops the process with an assertion
-        /// if it frees its device while a model's buffers still exist,
-        /// and it frees the device in a C++ static destructor at exit.
-        /// The registry keeps loaded models for as long as the process runs,
-        /// so without this handler, every process that exits with a model loaded would crash.
-        /// The C runtime runs exit handlers in the reverse order of their registration,
-        /// so a model registers this handler after its first load,
-        /// once the Metal device exists,
-        /// and the handler runs before the device's destructor.
-        static let exitHandlerRegistered: Void = {
-            atexit { LlamaLoaderRegistry.unloadAll() }
-        }()
+        /// ggml creates static objects as it needs them,
+        /// such as its Metal device and buffer types during a model's first load,
+        /// and the C runtime destroys them at exit
+        /// in the reverse order of the exit handlers and static objects that came before.
+        /// A handler runs before the objects created before its registration are destroyed,
+        /// but after the objects created later.
+        /// So every load registers the handler again when it ends,
+        /// and the last registration runs first, while every object that a model uses exists.
+        /// The handler does nothing after its first run.
+        static func registerExitHandler() {
+            atexit { LlamaLifecycle.shared.shutDown() }
+        }
     }
 
     /// Writes llama.cpp messages at or above ``LlamaEmbeddingModel/logLevel`` to standard error.
@@ -417,18 +428,104 @@
         }
     }
 
-    // MARK: - Engine
+    // MARK: - Lifecycle
+
+    /// Tracks the llama.cpp work in this process,
+    /// and frees every model when the process exits.
+    ///
+    /// ggml's Metal backend frees its device in a C++ static destructor at exit,
+    /// and it stops the process with an assertion
+    /// if a model or a context still has buffers on the device then.
+    /// Plain llama.cpp calls do the same
+    /// when a process exits with a model loaded on the GPU.
+    /// The loader registry keeps models for as long as the process runs,
+    /// so the package frees them in an exit handler.
+    ///
+    /// The handler, which every load registers,
+    /// stops new loads and embeddings,
+    /// waits for the ones that are running,
+    /// and frees the model and the cached context of every model that is still loaded,
+    /// including models that Swift objects still hold.
+    /// A running load stops at its next progress report,
+    /// and a running embedding stops before its next call to llama.cpp,
+    /// so the wait lasts about one call.
+    /// After the handler runs, every load and embedding throws
+    /// ``EmbeddingError/Kind/unavailable``.
+    final class LlamaLifecycle: @unchecked Sendable {
+        static let shared = LlamaLifecycle()
+
+        /// Guards the properties below, and signals when no operation is running.
+        private let condition = NSCondition()
+        private var isShuttingDown = false
+        private var activeOperations = 0
+        private var resources: [ObjectIdentifier: LlamaModelResources] = [:]
+
+        /// Whether the process is exiting.
+        var isStopping: Bool {
+            condition.withLock { isShuttingDown }
+        }
+
+        /// The number of loads and embeddings that are running.
+        var activeOperationCount: Int {
+            condition.withLock { activeOperations }
+        }
+
+        /// Runs a load or an embedding,
+        /// unless the process is exiting.
+        func perform<Result>(_ body: () throws -> Result) throws -> Result {
+            try condition.withLock {
+                guard !isShuttingDown else { throw Self.exiting }
+                activeOperations += 1
+            }
+            defer {
+                condition.withLock {
+                    activeOperations -= 1
+                    if activeOperations == 0 { condition.broadcast() }
+                }
+            }
+            return try body()
+        }
+
+        /// The error that work throws after the exit handler starts.
+        static var exiting: EmbeddingError {
+            .unavailable("The process is exiting, and llama.cpp models are unloaded.")
+        }
+
+        /// Records the resources of a model, so that ``shutDown()`` can free them.
+        func track(_ model: LlamaModelResources) {
+            condition.withLock { resources[ObjectIdentifier(model)] = model }
+        }
+
+        /// Frees the resources of a model, unless ``shutDown()`` freed them already.
+        func free(_ model: LlamaModelResources) {
+            condition.withLock {
+                resources[ObjectIdentifier(model)] = nil
+                model.free()
+            }
+        }
+
+        /// Stops new work, waits for the work that is running,
+        /// and frees the resources of every model.
+        func shutDown() {
+            condition.withLock {
+                isShuttingDown = true
+                while activeOperations > 0 {
+                    condition.wait()
+                }
+                for model in resources.values {
+                    model.free()
+                }
+                resources = [:]
+            }
+        }
+    }
 
     /// A loaded llama.cpp model and the context that its embeddings reuse.
     ///
-    /// The model's weights are read-only,
-    /// so several contexts can run on them at the same time.
-    /// A context isn't safe to share,
-    /// so each embedding checks out the cached context for its whole run.
-    /// An embedding that finds the context checked out
-    /// runs on a context of its own and frees it at the end,
-    /// as `LlamaLanguageModel` does with its session context.
-    final class LlamaEmbeddingEngine: @unchecked Sendable {
+    /// ``LlamaLifecycle`` holds these resources until it frees them,
+    /// separately from the ``LlamaEmbeddingEngine`` that uses them,
+    /// so that the exit handler can free a model that a Swift object still holds.
+    final class LlamaModelResources: @unchecked Sendable {
         /// The settings of a context, which depend on the model that creates it.
         struct ContextSettings: Hashable, Sendable {
             var maximumTokenCount: Int
@@ -442,18 +539,103 @@
             var isCheckedOut: Bool
         }
 
-        private let model: OpaquePointer
-        private let vocab: OpaquePointer
+        let model: OpaquePointer
+        let vocab: OpaquePointer
+
+        /// Guards `cachedContext` and `isFreed`.
+        private let lock = NSLock()
+        private var cachedContext: CachedContext?
+        private var isFreed = false
+
+        init(model: OpaquePointer, vocab: OpaquePointer) {
+            self.model = model
+            self.vocab = vocab
+        }
+
+        /// Frees the cached context and the model, once.
+        ///
+        /// Call it only through ``LlamaLifecycle``,
+        /// when no load or embedding uses the model.
+        func free() {
+            lock.withLock {
+                guard !isFreed else { return }
+                isFreed = true
+                if let cachedContext {
+                    llama_free(cachedContext.context)
+                }
+                cachedContext = nil
+                llama_model_free(model)
+            }
+        }
+
+        /// Puts a new context in the cache.
+        func cache(_ context: OpaquePointer, settings: ContextSettings) {
+            lock.withLock {
+                cachedContext = CachedContext(context: context, settings: settings, isCheckedOut: false)
+            }
+        }
+
+        /// Returns the cached context if it is free and has `settings`.
+        func checkOutCachedContext(_ settings: ContextSettings) -> OpaquePointer? {
+            lock.withLock {
+                guard var entry = cachedContext, !entry.isCheckedOut, entry.settings == settings else {
+                    return nil
+                }
+                entry.isCheckedOut = true
+                cachedContext = entry
+                return entry.context
+            }
+        }
+
+        /// Returns a context to the cache,
+        /// or frees it if it isn't the cached context and the cache already has one.
+        func checkIn(_ context: OpaquePointer, settings: ContextSettings) {
+            let free: Bool = lock.withLock {
+                if cachedContext?.context == context {
+                    cachedContext?.isCheckedOut = false
+                    return false
+                }
+                if let entry = cachedContext {
+                    // Keep the context of the most recent settings,
+                    // unless another embedding is using the cached one.
+                    guard !entry.isCheckedOut, entry.settings != settings else { return true }
+                    llama_free(entry.context)
+                }
+                cachedContext = CachedContext(context: context, settings: settings, isCheckedOut: false)
+                return false
+            }
+            if free {
+                llama_free(context)
+            }
+        }
+    }
+
+    // MARK: - Engine
+
+    /// Runs embeddings on a loaded llama.cpp model.
+    ///
+    /// The model's weights are read-only,
+    /// so several contexts can run on them at the same time.
+    /// A context isn't safe to share,
+    /// so each embedding checks out the cached context for its whole run.
+    /// An embedding that finds the context checked out
+    /// runs on a context of its own and frees it at the end,
+    /// as `LlamaLanguageModel` does with its session context.
+    ///
+    /// Call the engine's methods, and create it,
+    /// only inside ``LlamaLifecycle/perform(_:)``.
+    final class LlamaEmbeddingEngine: @unchecked Sendable {
+        typealias ContextSettings = LlamaModelResources.ContextSettings
+
+        private let resources: LlamaModelResources
+        private var model: OpaquePointer { resources.model }
+        private var vocab: OpaquePointer { resources.vocab }
 
         /// The number of elements in each vector that the model produces.
         let dimension: Int
 
         /// The context length that the model was trained with, or `nil` if the file doesn't say.
         let trainedContextLength: Int?
-
-        /// Guards `cachedContext`.
-        private let lock = NSLock()
-        private var cachedContext: CachedContext?
 
         /// Loads the model and checks that it produces one vector for each text.
         init(path: String, gpuLayers: Int32, settings: ContextSettings) throws {
@@ -465,16 +647,19 @@
             var params = llama_model_default_params()
             params.n_gpu_layers = gpuLayers
             params.load_mode = LLAMA_LOAD_MODE_MMAP
+            // Returning false stops the load, so that the exit handler doesn't wait for all of it.
+            params.progress_callback = { _, _ in !LlamaLifecycle.shared.isStopping }
             guard let model = llama_model_load_from_file(path, params) else {
+                if LlamaLifecycle.shared.isStopping { throw LlamaLifecycle.exiting }
                 throw LlamaEmbeddingModelError.modelLoadFailed
             }
-            LlamaRuntime.exitHandlerRegistered
             guard let vocab = llama_model_get_vocab(model) else {
                 llama_model_free(model)
                 throw LlamaEmbeddingModelError.modelLoadFailed
             }
-            self.model = model
-            self.vocab = vocab
+            let resources = LlamaModelResources(model: model, vocab: vocab)
+            LlamaLifecycle.shared.track(resources)
+            self.resources = resources
             self.dimension = Int(llama_model_n_embd_out(model))
             let trained = Int(llama_model_n_ctx_train(model))
             self.trainedContextLength = trained > 0 ? trained : nil
@@ -489,7 +674,8 @@
             let context = try makeContext(settings)
             switch llama_pooling_type(context) {
             case LLAMA_POOLING_TYPE_MEAN, LLAMA_POOLING_TYPE_CLS, LLAMA_POOLING_TYPE_LAST:
-                cachedContext = CachedContext(context: context, settings: settings, isCheckedOut: false)
+                resources.cache(context, settings: settings)
+                LlamaRuntime.registerExitHandler()
             default:
                 llama_free(context)
                 throw LlamaEmbeddingModelError.notEmbeddingModel
@@ -497,10 +683,7 @@
         }
 
         deinit {
-            if let cachedContext {
-                llama_free(cachedContext.context)
-            }
-            llama_model_free(model)
+            LlamaLifecycle.shared.free(resources)
         }
 
         /// The number of tokens that the model reads from one text.
@@ -544,42 +727,6 @@
             return context
         }
 
-        /// Returns the cached context if it is free and has `settings`,
-        /// or a new context otherwise.
-        private func checkOutContext(_ settings: ContextSettings) throws -> OpaquePointer {
-            let cached: OpaquePointer? = lock.withLock {
-                guard var entry = cachedContext, !entry.isCheckedOut, entry.settings == settings else {
-                    return nil
-                }
-                entry.isCheckedOut = true
-                cachedContext = entry
-                return entry.context
-            }
-            return try cached ?? makeContext(settings)
-        }
-
-        /// Returns a context to the cache,
-        /// or frees it if it isn't the cached context and the cache already has one.
-        private func checkInContext(_ context: OpaquePointer, settings: ContextSettings) {
-            let free: Bool = lock.withLock {
-                if cachedContext?.context == context {
-                    cachedContext?.isCheckedOut = false
-                    return false
-                }
-                if let entry = cachedContext {
-                    // Keep the context of the most recent settings,
-                    // unless another embedding is using the cached one.
-                    guard !entry.isCheckedOut, entry.settings != settings else { return true }
-                    llama_free(entry.context)
-                }
-                cachedContext = CachedContext(context: context, settings: settings, isCheckedOut: false)
-                return false
-            }
-            if free {
-                llama_free(context)
-            }
-        }
-
         /// Returns the tokens of `text`, with the model's special tokens, truncated to `limit`.
         func tokenize(_ text: String, limit: Int) throws -> [llama_token] {
             let count = Int32(clamping: text.utf8.count)
@@ -603,8 +750,8 @@
         func embed(_ inputs: [String], settings: ContextSettings) throws -> [[Float]] {
             let limit = tokenLimit(for: settings)
             let tokens = try inputs.map { try tokenize($0, limit: limit) }
-            let context = try checkOutContext(settings)
-            defer { checkInContext(context, settings: settings) }
+            let context = try resources.checkOutCachedContext(settings) ?? makeContext(settings)
+            defer { resources.checkIn(context, settings: settings) }
 
             let capacity = tokenCapacity(for: settings)
             let batch = llama_batch_init(Int32(capacity), 0, 1)
@@ -619,6 +766,8 @@
             vectors.reserveCapacity(inputs.count)
             for group in groups {
                 try Task.checkCancellation()
+                // The exit handler waits for this embedding, so stop it early.
+                if LlamaLifecycle.shared.isStopping { throw LlamaLifecycle.exiting }
                 vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
             }
             return vectors

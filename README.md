@@ -236,6 +236,17 @@ Copies of a model share one loaded copy of its weights.
 Call `removeFromCache()` or `LlamaEmbeddingModel.removeAllFromCache()`
 to release them.
 
+ggml's Metal backend stops a process with an assertion
+if the process exits while a model is still loaded on the GPU,
+even when the process uses llama.cpp directly.
+So when the process exits normally, the package stops new loads and embeddings,
+waits for the ones that are running to reach their next call to llama.cpp,
+and frees every model that it loaded.
+This covers only models that this package loads,
+and only an exit that runs exit handlers, such as `exit()` or a return from `main`.
+Models that other code loads with llama.cpp,
+such as AnyLanguageModel's `LlamaLanguageModel`, must be freed by that code.
+
 llama.cpp writes warnings and errors to standard error.
 Set `LlamaEmbeddingModel.logLevel` to change the level.
 The setting applies to the whole process,

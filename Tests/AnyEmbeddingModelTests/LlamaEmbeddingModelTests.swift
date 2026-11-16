@@ -261,6 +261,73 @@
         }
     }
 
+    /// Tests that exit a child process with a model loaded on the GPU.
+    ///
+    /// Without the package's exit handler,
+    /// ggml's Metal backend stops such a process with an assertion,
+    /// and the child exits with `SIGABRT` instead of success.
+    @Suite("LlamaEmbeddingModel at exit", .needsLlamaEmbeddingModel)
+    struct LlamaEmbeddingModelExitTests {
+        @Test("A process exits normally with a model loaded and idle")
+        func idleExit() async {
+            await #expect(processExitsWith: .success) {
+                let model = LlamaEmbeddingModel(
+                    modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "1",
+                    dimension: 384
+                )
+                _ = try await model.embed("tea", for: .document)
+                exit(0)
+            }
+        }
+
+        @Test("A process exits normally during an embedding")
+        func exitDuringEmbedding() async {
+            await #expect(processExitsWith: .success) {
+                let model = LlamaEmbeddingModel(
+                    modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "1",
+                    dimension: 384
+                )
+                try await model.prewarm()
+                let texts = (0 ..< 20_000).map { "Note \($0): green tea has less caffeine than coffee." }
+                Task.detached { _ = try? await model.embed(texts, for: .document) }
+                // Wait until the embedding runs, then exit in the middle of it.
+                let deadline = Date().addingTimeInterval(10)
+                while LlamaLifecycle.shared.activeOperationCount == 0 {
+                    // A distinct status shows that the embedding never started.
+                    guard Date() < deadline else { exit(3) }
+                    usleep(1_000)
+                }
+                usleep(50_000)
+                guard LlamaLifecycle.shared.activeOperationCount > 0 else { exit(4) }
+                exit(0)
+            }
+        }
+
+        @Test("After the exit handler runs, an embedding throws and nothing loads")
+        func workAfterShutdown() async {
+            await #expect(processExitsWith: .success) {
+                let model = LlamaEmbeddingModel(
+                    modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "1",
+                    dimension: 384
+                )
+                _ = try await model.embed("tea", for: .document)
+                LlamaLifecycle.shared.shutDown()
+                do {
+                    _ = try await model.embed("tea", for: .document)
+                    exit(5)
+                } catch let error as EmbeddingError where error.kind == .unavailable {
+                    exit(0)
+                }
+            }
+        }
+    }
+
     @Suite("LlamaEmbeddingModel with a language model", .needsLlamaLanguageModel)
     struct LlamaEmbeddingModelLanguageModelTests {
         @Test("A model that generates text fails to load")
