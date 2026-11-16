@@ -55,6 +55,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Print tool versions
+        run: |
+          swift --version
+          xcodebuild -version
+
       # Swift 6.4's default build system compiles MLX's Metal shaders,
       # and the Xcode 27 runner image doesn't include the Metal toolchain.
       - name: Identify Xcode build
@@ -121,6 +126,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Print tool versions
+        run: |
+          swift --version
+          xcodebuild -version
 
       - name: Build for watchOS
         run: xcodebuild build -scheme AnyEmbeddingModel -destination 'generic/platform=watchOS' CODE_SIGNING_ALLOWED=NO
