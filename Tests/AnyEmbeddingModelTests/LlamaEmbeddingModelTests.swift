@@ -221,6 +221,8 @@
         @Test("Tokens match sentence-transformers, and vectors agree with its reference")
         func reference() async throws {
             let fixture = try BGEReference.load()
+            // The fixture has 11 cases, from short queries to texts above the token limit.
+            #expect(fixture.cases.count == 11)
             for item in fixture.cases {
                 let purpose: EmbeddingPurpose = item.purpose == "query" ? .query : .document
                 let tokens = try await model.tokenIDs(for: [item.text], purpose: purpose)
@@ -238,15 +240,19 @@
         @Test("Concurrent embeddings give the same vectors")
         func concurrency() async throws {
             let expected = try await model.embed(Self.texts, for: .document)
+            #expect(expected.count == Self.texts.count)
             let model = model
-            try await withThrowingTaskGroup(of: [[Float]].self) { group in
+            let results = try await withThrowingTaskGroup(of: [[Float]].self) { group in
                 for _ in 0 ..< 4 {
                     group.addTask { try await model.embed(Self.texts, for: .document) }
                 }
-                for try await vectors in group {
-                    for (actual, reference) in zip(vectors, expected) {
-                        #expect(cosine(actual, reference) > 0.9999)
-                    }
+                return try await group.reduce(into: []) { $0.append($1) }
+            }
+            #expect(results.count == 4)
+            for vectors in results {
+                #expect(vectors.count == expected.count)
+                for (actual, reference) in zip(vectors, expected) {
+                    #expect(cosine(actual, reference) > 0.9999)
                 }
             }
         }
