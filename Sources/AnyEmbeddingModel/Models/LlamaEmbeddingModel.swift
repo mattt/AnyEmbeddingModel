@@ -576,6 +576,11 @@
             return try body()
         }
 
+        /// Throws ``exiting`` if the exit handler has started.
+        func stopIfExiting() throws(EmbeddingError) {
+            if isStopping { throw Self.exiting }
+        }
+
         /// Whether the current thread is running an operation.
         private var isInsideOperation: Bool {
             (Thread.current.threadDictionary[Self.depthKey] as? Int ?? 0) > 0
@@ -781,6 +786,8 @@
             if llama_model_has_encoder(model) && llama_model_has_decoder(model) {
                 throw LlamaEmbeddingModelError.encoderDecoderModel
             }
+            // The exit handler waits for this load, so stop it before the context.
+            try LlamaLifecycle.shared.stopIfExiting()
             // The pooling type comes from the file,
             // and a context reports it, so check it with the first context.
             let context = try makeContext(settings)
@@ -868,7 +875,14 @@
         /// Returns the pooled vector of each input, in input order, without normalization.
         func embed(_ inputs: [String], settings: ContextSettings) throws -> [[Float]] {
             let limit = tokenLimit(for: settings)
-            let tokens = try inputs.map { try tokenize($0, limit: limit) }
+            // The exit handler waits for this embedding, so stop it at each step.
+            var tokens: [[llama_token]] = []
+            tokens.reserveCapacity(inputs.count)
+            for input in inputs {
+                try LlamaLifecycle.shared.stopIfExiting()
+                tokens.append(try tokenize(input, limit: limit))
+            }
+            try LlamaLifecycle.shared.stopIfExiting()
             let context = try resources.checkOutCachedContext(settings) ?? makeContext(settings)
             defer { resources.checkIn(context, settings: settings) }
 
@@ -885,8 +899,7 @@
             vectors.reserveCapacity(inputs.count)
             for group in groups {
                 try Task.checkCancellation()
-                // The exit handler waits for this embedding, so stop it early.
-                if LlamaLifecycle.shared.isStopping { throw LlamaLifecycle.exiting }
+                try LlamaLifecycle.shared.stopIfExiting()
                 vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
             }
             let isFirstEmbedding = hasEmbedded.withLock { hasEmbedded in
