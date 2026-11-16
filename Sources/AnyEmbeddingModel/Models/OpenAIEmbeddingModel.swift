@@ -81,10 +81,12 @@ public struct OpenAIEmbeddingModel: EmbeddingModel {
     /// - Parameters:
     ///   - baseURL: The URL that the path `embeddings` is added to.
     ///     The default is ``defaultBaseURL``.
-    ///   - apiKey: A key to send as a bearer token, or a closure that returns one.
+    ///   - apiKey: An expression for the key to send as a bearer token,
+    ///     such as a string literal or a call like `currentAPIKey()`.
+    ///     The parameter is an autoclosure,
+    ///     so the model evaluates the expression again, once for each request,
+    ///     and an expression that calls a function can return a new key after a rotation.
     ///     An empty key sends no `Authorization` header.
-    ///     The model evaluates it once for each request,
-    ///     so a closure can return a new key after a rotation.
     ///     If a response contains the key that its request sent,
     ///     errors omit the server's text and say that it was withheld.
     ///     The model looks for the key after it decodes JSON escapes and percent-encoding,

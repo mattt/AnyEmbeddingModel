@@ -208,8 +208,19 @@ let model = OpenAIEmbeddingModel(
 ```
 
 `baseURL` defaults to `OpenAIEmbeddingModel.defaultBaseURL`, OpenAI's API.
-`apiKey` is a string or a closure that returns one,
-and the model evaluates it for each request.
+`apiKey` takes a `String` expression, such as a string literal or a function call.
+The parameter is an autoclosure,
+so the model evaluates the expression again, once for each request,
+and a function that returns the current key picks up a rotated key:
+
+```swift
+let model = OpenAIEmbeddingModel(
+    apiKey: currentAPIKey(),  // Called again for each request.
+    model: "text-embedding-3-small",
+    dimension: 1536
+)
+```
+
 An empty key sends no `Authorization` header.
 If an error response might contain the key,
 the model withholds the server's text from the error.
