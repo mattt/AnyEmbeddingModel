@@ -170,6 +170,15 @@ struct CoreTests {
         }
     }
 
+    @Test("Truncation keeps the last token and reaches the limit")
+    func truncation() {
+        let ids = Array(0 ..< 10)
+        #expect(Vectors.truncated(ids, limit: 4) == [0, 1, 2, 9])
+        #expect(Vectors.truncated(ids, limit: 10) == ids)
+        #expect(Vectors.truncated(ids, limit: 11) == ids)
+        #expect(Vectors.truncated([Int](), limit: 4) == [])
+    }
+
     @Test("Validation rejects whitespace-only text")
     func validation() throws {
         try Vectors.validate(["a", "b"])

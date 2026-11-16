@@ -47,10 +47,10 @@
             throw error
         }
     }
-
-    /// Returns the cosine similarity of two vectors.
-    func cosine(_ a: [Float], _ b: [Float]) -> Float {
-        zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
-            / (a.reduce(0) { $0 + $1 * $1 }.squareRoot() * b.reduce(0) { $0 + $1 * $1 }.squareRoot())
-    }
 #endif
+
+/// Returns the cosine similarity of two vectors.
+func cosine(_ a: [Float], _ b: [Float]) -> Float {
+    zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
+        / (a.reduce(0) { $0 + $1 * $1 }.squareRoot() * b.reduce(0) { $0 + $1 * $1 }.squareRoot())
+}

@@ -603,18 +603,9 @@
             limit: Int,
             tokenizer: any MLXLMCommon.Tokenizer
         ) -> [[Int]] {
-            inputs.map { truncated(tokenizer.encode(text: $0, addSpecialTokens: true), limit: limit) }
-        }
-
-        /// Returns `ids` with at most `limit` tokens.
-        ///
-        /// The last token stays, because the tokenizer's template puts a special token there:
-        /// a separator for BERT, and `<|endoftext|>` for Qwen3, whose pooling reads it.
-        /// That token can differ from the tokenizer's `eos_token`,
-        /// so this function never adds one.
-        static func truncated(_ ids: [Int], limit: Int) -> [Int] {
-            guard ids.count > limit, let last = ids.last else { return ids }
-            return Array(ids.prefix(limit - 1)) + [last]
+            inputs.map {
+                Vectors.truncated(tokenizer.encode(text: $0, addSpecialTokens: true), limit: limit)
+            }
         }
 
         /// Tokenizes, pads, and runs one batch, and pools the hidden states.

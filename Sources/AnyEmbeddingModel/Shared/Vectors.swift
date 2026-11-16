@@ -56,6 +56,17 @@ enum Vectors {
         return result
     }
 
+    /// Returns `tokens` with at most `limit` tokens.
+    ///
+    /// The last token stays, because the tokenizer puts a special token there:
+    /// a separator for BERT, and `<|endoftext|>` for Qwen3, whose pooling reads it.
+    /// That token can differ from the tokenizer's end-of-sequence token,
+    /// so this function never adds one.
+    static func truncated<Token>(_ tokens: [Token], limit: Int) -> [Token] {
+        guard tokens.count > limit, let last = tokens.last else { return tokens }
+        return Array(tokens.prefix(limit - 1)) + [last]
+    }
+
     /// Splits `elements` into consecutive groups of at most `size` elements.
     static func batches<T>(_ elements: [T], size: Int) -> [ArraySlice<T>] {
         precondition(size > 0, "The batch size must be greater than zero.")
