@@ -737,8 +737,14 @@
 
         /// Returns the tokens of `text`, with the model's special tokens, truncated to `limit`.
         func tokenize(_ text: String, limit: Int) throws -> [llama_token] {
-            let count = Int32(clamping: text.utf8.count)
-            var capacity = max(count + 8, 16)
+            // llama.cpp takes the length of the text and the capacity as 32-bit integers.
+            let byteCount = text.utf8.count
+            guard byteCount <= Int(Int32.max) else {
+                throw LlamaEmbeddingModelError.tokenizationFailed
+            }
+            let count = Int32(byteCount)
+            // Add in `Int`, which can't overflow here, and clamp the result.
+            var capacity = max(Int32(clamping: byteCount + 8), 16)
             for _ in 0 ..< 2 {
                 var tokens = [llama_token](repeating: 0, count: Int(capacity))
                 // llama.cpp's embedding example and server
@@ -748,7 +754,8 @@
                     return Vectors.truncated(Array(tokens.prefix(Int(written))), limit: limit)
                 }
                 // A negative result is the number of tokens that the text needs.
-                guard written < 0 else { break }
+                // `Int32.min` has no positive counterpart, so it is an error.
+                guard written < 0, written != .min else { break }
                 capacity = -written
             }
             throw LlamaEmbeddingModelError.tokenizationFailed
