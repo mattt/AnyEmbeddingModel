@@ -112,10 +112,10 @@ jobs:
         run: rm -rf .build/out/Intermediates.noindex/XCBuildData/*.xcbuilddata
 
       - name: Build
-        run: swift build --build-tests --traits MLX${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift build --build-tests --traits MLX,Llama${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
       - name: Test
-        run: swift test --skip-build --traits MLX${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
+        run: swift test --skip-build --traits MLX,Llama${{ matrix.traits != '' && format(',{0}', matrix.traits) || '' }}
 
   build-watchos:
     permissions:
