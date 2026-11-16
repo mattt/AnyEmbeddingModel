@@ -243,8 +243,10 @@ if the process exits while a model is still loaded on the GPU,
 even when the process uses llama.cpp directly.
 The package tries to prevent this with an exit handler.
 The handler stops new loads and embeddings,
-waits up to three seconds for running ones to reach their next call to llama.cpp,
-and then frees every model that the package loaded.
+and waits up to three seconds for running ones to stop.
+A running embedding stops between texts while it tokenizes them
+and between batches.
+If no work is running then, the handler frees every model that the package loaded.
 If work is still running at that time, the handler frees nothing,
 so the process ends as it would without the handler.
 The handler can't help in these cases:
@@ -258,8 +260,10 @@ The handler can't help in these cases:
   such as AnyLanguageModel's `LlamaLanguageModel`.
 
 To be certain that no model is loaded when the process exits,
-call `LlamaEmbeddingModel.removeAllFromCache()`
-after running embeddings end, and before the exit.
+finish every load, `prewarm()`, and embedding,
+start no new work, and then call `LlamaEmbeddingModel.removeAllFromCache()`.
+The call cancels a running load without waiting for it,
+and that load can still finish and cache its model.
 
 llama.cpp writes warnings and errors to standard error.
 Set `LlamaEmbeddingModel.logLevel` to change the level.

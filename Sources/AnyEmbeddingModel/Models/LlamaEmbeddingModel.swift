@@ -41,7 +41,10 @@
     /// - An exit that runs no exit handlers, such as `_exit` or a crash.
     ///
     /// To be certain that no model is loaded when the process exits,
-    /// call ``removeAllFromCache()`` and let running embeddings end first.
+    /// finish every load, ``prewarm()``, and embedding,
+    /// start no new work, and then call ``removeAllFromCache()``.
+    /// The call cancels a running load without waiting for it,
+    /// and that load can still finish and cache its model.
     ///
     /// The package can't tell whether a file has changed,
     /// so ``version`` is your promise:
@@ -296,8 +299,11 @@
         /// and their next embedding loads the weights again.
         /// An embedding that is running keeps its model's weights until it ends.
         ///
-        /// Call this method, after running embeddings end,
-        /// to be certain that no model is loaded when the process exits.
+        /// To be certain that no model is loaded when the process exits,
+        /// finish every load, ``prewarm()``, and embedding,
+        /// start no new work, and then call this method.
+        /// It cancels a running load without waiting for it,
+        /// and that load can still finish and cache its model.
         /// The package's exit handler is best effort; see ``LlamaEmbeddingModel``.
         public static func removeAllFromCache() async {
             LlamaLoaderRegistry.unloadAll()
@@ -496,7 +502,8 @@
     /// It stops new loads and embeddings,
     /// and it waits up to ``exitDeadline`` for the ones that are running:
     /// a load stops at its next progress report,
-    /// and an embedding stops before its next call to llama.cpp.
+    /// and an embedding stops between texts while it tokenizes them
+    /// and between batches.
     /// If no work is running then,
     /// it frees the model and the cached context of every model that is still loaded,
     /// including models that Swift objects still hold.
@@ -523,8 +530,9 @@
 
         /// How long the exit handler waits for running loads and embeddings.
         ///
-        /// A running embedding stops before its next call to llama.cpp,
-        /// so the wait is about one call:
+        /// A running embedding stops between texts while it tokenizes them
+        /// and between batches,
+        /// so the wait is about one call to llama.cpp:
         /// one batch of at most ``LlamaEmbeddingModel/maximumBatchSize`` texts,
         /// which takes milliseconds for the test model.
         /// Three seconds leaves room for one batch of a much larger model,
@@ -611,7 +619,7 @@
 
         /// The error that work throws after the exit handler starts.
         static var exiting: EmbeddingError {
-            .unavailable("The process is exiting, and llama.cpp models are unloaded.")
+            .unavailable("The process is exiting, so the package has stopped its llama.cpp work.")
         }
 
         /// Records the resources of a model, so that ``shutDown()`` can free them.
