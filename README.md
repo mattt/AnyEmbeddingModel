@@ -22,10 +22,11 @@ let query = try await model.embed("Where does my sister live?", for: .query)
 let similarities = documents.map { zip($0, query).reduce(0) { $0 + $1.0 * $1.1 } }
 ```
 
-Three backends are available:
+Four backends are available:
 
 - [NaturalLanguage](#naturallanguage) uses Apple's system sentence embeddings.
 - [MLX](#mlx) runs models from the Hugging Face Hub on the GPU.
+- [llama.cpp (GGUF)](#llamacpp-gguf) runs GGUF model files with llama.cpp.
 - [OpenAI](#openai) calls servers that accept the `/v1/embeddings` format.
 
 ## Requirements
@@ -33,6 +34,8 @@ Three backends are available:
 - Swift 6.3+ (Xcode 26.4+)
 - macOS 14, Mac Catalyst 17, iOS 17, tvOS 17, watchOS 10, or visionOS 1 or later
 - For MLX, Apple silicon and the Metal toolchain; watchOS is not supported.
+- For llama.cpp, macOS or an iOS device;
+  the iOS Simulator, Mac Catalyst, tvOS, watchOS, and visionOS are not supported.
 
 ## Installation
 
@@ -52,6 +55,7 @@ Each trait adds a feature and its dependencies:
 | Trait | Feature | Dependencies |
 | --- | --- | --- |
 | `MLX` | `MLXEmbeddingModel` | mlx-swift-lm, swift-transformers, swift-huggingface |
+| `Llama` | `LlamaEmbeddingModel` | llama.swift |
 | `AsyncHTTPClient` | AsyncHTTPClient as the default transport for `OpenAIEmbeddingModel` | async-http-client |
 
 ```swift
@@ -79,14 +83,14 @@ Use the same model for queries and documents.
 Pass plain text and a purpose, `.query` or `.document`.
 The backend adds the configured prefix for that purpose.
 MLX presets configure their own prefixes;
-for other models, set `prefixes` to match the model.
+for other models, including GGUF files, set `prefixes` to match the model.
 `EmbeddingPrefixes` provides `.bge`, `.e5`, `.nomic`, and `.qwen3(task:)`,
 or you can supply your own query and document strings.
 
 Store `identifier` with saved vectors,
 and embed the texts again when it changes.
 The identifier includes the model's revision and settings that affect vectors.
-For remote models and local MLX files,
+For remote models and local MLX and GGUF files,
 you must update the revision or version when the model changes,
 as described below.
 
@@ -189,6 +193,58 @@ If your toolchain uses the native build system by default,
 pass `--build-system swiftbuild` to `swift build`.
 See [Development](#development) for the extra step needed by tests.
 
+### llama.cpp (GGUF)
+
+`LlamaEmbeddingModel` runs a GGUF embedding model in process with
+[llama.cpp](https://github.com/ggml-org/llama.cpp),
+through [llama.swift](https://github.com/mattt/llama.swift).
+It requires the `Llama` trait:
+
+```swift
+let model = LlamaEmbeddingModel(
+    modelPath: "/path/to/bge-small-en-v1.5-q8_0.gguf",
+    name: "bge-small-en-v1.5-q8_0",
+    version: "1",
+    dimension: 384,
+    prefixes: .bge
+)
+
+// Optional: load the model and check its dimension before the first embedding.
+try await model.prewarm()
+
+let vectors = try await model.embed(["I like tea."], for: .document)
+```
+
+The model loads a local file;
+download the file first, for example from the Hugging Face Hub.
+The tests use `bge-small-en-v1.5-q8_0.gguf`
+from [ggml-org/bge-small-en-v1.5-Q8_0-GGUF](https://huggingface.co/ggml-org/bge-small-en-v1.5-Q8_0-GGUF).
+The identifier uses `name` and `version`, not the path.
+Change `version` whenever the file changes.
+
+llama.cpp pools each text with the pooling type in the file's metadata.
+A file without one, such as a model that generates text,
+and a reranker fail to load with `LlamaEmbeddingModelError.notEmbeddingModel`.
+GGUF files don't record a model's query and document prefixes,
+so set `prefixes` to match the model.
+
+The model puts as many texts in each call to llama.cpp
+as `maximumBatchSize` and the token limit of a call allow.
+By default, it offloads every layer to the GPU with Metal;
+pass `gpuLayers: 0` to run on the CPU.
+Copies of a model share one loaded copy of its weights.
+Call `removeFromCache()` or `LlamaEmbeddingModel.removeAllFromCache()`
+to release them.
+
+llama.cpp writes warnings and errors to standard error.
+Set `LlamaEmbeddingModel.logLevel` to change the level.
+The setting applies to the whole process,
+including AnyLanguageModel's `LlamaLanguageModel`.
+
+The llama.cpp binary framework has slices only for macOS and iOS devices,
+so the `Llama` trait doesn't build for the iOS Simulator,
+Mac Catalyst, tvOS, watchOS, or visionOS.
+
 ### OpenAI
 
 `OpenAIEmbeddingModel` sends `POST {baseURL}/embeddings`
@@ -252,13 +308,15 @@ with the response and its body.
 
 ## Limitations
 
-- MLX truncates text to `maximumTokenCount` without reporting it,
+- MLX and llama.cpp truncate text to `maximumTokenCount` without reporting it,
   or to the model's token limit if it is smaller.
   The default is 512 tokens; the `allMiniLM` preset uses 256.
   The package does not split long texts.
 - The OpenAI backend sends text without truncation;
   the server determines how to handle long input.
-- The MLX backend does not produce shorter vectors from Matryoshka models.
+- The MLX and llama.cpp backends do not produce shorter vectors from Matryoshka models.
+- The llama.cpp backend loads only local files,
+  and it uses the pooling type in the file.
 
 ## Development
 
@@ -270,12 +328,14 @@ and its tests run on macOS:
 | `mise run setup` | Resolve the dependencies of the package and of every trait. |
 | `mise run build` | Build the library without traits. |
 | `mise run build:mlx` | Build the library with the `MLX` trait. |
+| `mise run build:llama` | Build the library with the `Llama` trait. |
 | `mise run build:ios` | Compile the library for iOS with `xcodebuild`. |
 | `mise run lint` | Check the formatting and lint rules. |
 | `mise run format` | Format the Swift sources in place. |
 | `mise run test` | Run tests with a local mock server and stub loads, without MLX or model downloads. |
 | `mise run test:mlx` | Enable MLX and run tests with a local server in place of the Hub, without loading real models. |
 | `mise run test:hub` | Load real models and compare them with reference vectors in `Tests/AnyEmbeddingModelTests/Fixtures`. |
+| `mise run test:llama` | Enable llama.cpp and run the tests, with a GGUF model if `LLAMA_EMBEDDING_MODEL_PATH` is set. |
 
 The build and test tasks read `Package.resolved` without changing it,
 because a resolution without a trait would drop that trait's dependencies from the file.
@@ -296,7 +356,16 @@ The task stops with an error if the toolchain cannot produce the library.
 Tests that start MLX's Metal device run only in this task,
 because MLX stops a process that cannot find the library.
 
-The real-model tests download model files as needed.
+The llama.cpp tests that load a model run only when
+`LLAMA_EMBEDDING_MODEL_PATH` is the path of `bge-small-en-v1.5-q8_0.gguf`
+from [ggml-org/bge-small-en-v1.5-Q8_0-GGUF](https://huggingface.co/ggml-org/bge-small-en-v1.5-Q8_0-GGUF).
+They compare its tokens and vectors with the sentence-transformers reference for `bge-small`.
+One more test runs when `LLAMA_MODEL_PATH`,
+the variable that AnyLanguageModel's tests read,
+is the path of a GGUF model that generates text,
+and checks that the model fails to load.
+
+The MLX real-model tests download model files as needed.
 One test also asks the Hub whether each preset's commit exists.
 `mise run generate:fixtures` regenerates the reference vectors
 with pinned package versions.
