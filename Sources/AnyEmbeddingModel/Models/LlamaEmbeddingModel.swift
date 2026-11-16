@@ -648,9 +648,16 @@
                 // The operation on this thread can't end while its thread waits here.
                 guard !insideOperation else { return .insideOperation }
                 guard !registrationFailed else { return .registrationFailed }
-                let end = Date(timeIntervalSinceNow: deadline)
+                // Measure the deadline with a monotonic clock,
+                // and wait in short steps that start from the current wall-clock time,
+                // so that a change to the wall clock can't extend the wait.
+                let clock = ContinuousClock()
+                let end = clock.now + .seconds(deadline)
                 while activeOperations > 0 {
-                    guard condition.wait(until: end) else { break }
+                    let remaining = clock.now.duration(to: end)
+                    guard remaining > .zero else { break }
+                    let step = min(remaining, .milliseconds(100))
+                    _ = condition.wait(until: Date(timeIntervalSinceNow: step / .seconds(1)))
                 }
                 guard activeOperations == 0 else { return .timedOut }
                 models = Array(resources.values)
