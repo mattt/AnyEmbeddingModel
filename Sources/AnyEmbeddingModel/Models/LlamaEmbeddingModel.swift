@@ -553,9 +553,6 @@
         private var activeOperations = 0
         private var resources: [ObjectIdentifier: LlamaModelResources] = [:]
 
-        /// A function that an embedding calls before each call to llama.cpp, for tests.
-        let beforeDecode = Locked<(@Sendable () -> Void)?>(nil)
-
         /// Whether the process is exiting.
         var isStopping: Bool {
             condition.withLock { isShuttingDown }
@@ -644,6 +641,17 @@
             }
         }
     }
+
+    #if DEBUG
+        /// Functions that tests run at points inside llama.cpp work.
+        ///
+        /// Only debug builds, which `swift test` uses, compile these hooks,
+        /// so they cost nothing in a release build.
+        enum LlamaTestHooks {
+            /// Runs before each call to `llama_decode`, on the embedding's thread.
+            static let beforeDecode = Locked<(@Sendable () -> Void)?>(nil)
+        }
+    #endif
 
     /// A loaded llama.cpp model and the context that its embeddings reuse.
     ///
@@ -972,7 +980,9 @@
             if let memory = llama_get_memory(context) {
                 llama_memory_clear(memory, true)
             }
-            LlamaLifecycle.shared.beforeDecode.withLock { $0 }?()
+            #if DEBUG
+                LlamaTestHooks.beforeDecode.withLock { $0 }?()
+            #endif
             // llama_decode runs the encoder for a model without a cache, such as BERT.
             guard llama_decode(context, batch) == 0 else {
                 throw LlamaEmbeddingModelError.decodingFailed
