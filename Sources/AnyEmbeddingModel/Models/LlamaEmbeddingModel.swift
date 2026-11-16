@@ -57,6 +57,10 @@
             /// The last load failed, with a description of the error.
             /// The next embedding tries again.
             case failedToLoad(String)
+
+            /// The process is exiting, and the package has stopped its llama.cpp work.
+            /// Every load and embedding throws ``EmbeddingError/Kind/unavailable``.
+            case exiting
         }
 
         /// The verbosity level for llama.cpp logging.
@@ -248,7 +252,10 @@
         /// A model that isn't loaded is still usable:
         /// the next embedding loads it.
         public var availability: Availability<UnavailableReason> {
-            switch loader.state {
+            if LlamaLifecycle.shared.isStopping {
+                return .unavailable(.exiting)
+            }
+            return switch loader.state {
             case .loaded: .available
             case .failed(let description): .unavailable(.failedToLoad(description))
             case .notLoaded: .unavailable(.notLoaded)
@@ -259,10 +266,14 @@
         ///
         /// - Throws: ``LlamaEmbeddingModelError`` if the file can't be loaded
         ///   or isn't an embedding model,
-        ///   or ``EmbeddingError/Kind/dimensionMismatch``
-        ///   if the model produces vectors of another size than ``dimension``.
+        ///   ``EmbeddingError/Kind/dimensionMismatch``
+        ///   if the model produces vectors of another size than ``dimension``,
+        ///   or ``EmbeddingError/Kind/unavailable`` if the process is exiting.
         public func prewarm() async throws {
             let engine = try await loader.container()
+            // A model that loaded before the exit handler started is in the cache,
+            // but it can't embed now.
+            try LlamaLifecycle.shared.stopIfExiting()
             guard engine.dimension == dimension else {
                 throw EmbeddingError.dimensionMismatch(expected: dimension, actual: engine.dimension)
             }

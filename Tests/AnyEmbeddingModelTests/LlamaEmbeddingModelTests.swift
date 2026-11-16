@@ -366,17 +366,42 @@
             #expect(ContinuousClock.now - start < .seconds(LlamaLifecycle.exitDeadline))
         }
 
-        @Test("After the exit handler runs, an embedding throws and nothing loads")
+        @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")
         func workAfterShutdown() async {
             await #expect(processExitsWith: .success) {
                 let model = try await LlamaEmbeddingModelExitTests.loadedModel()
                 guard LlamaLifecycle.shared.shutDown() == .freed else { exit(6) }
+                guard model.availability == .unavailable(.exiting) else { exit(7) }
                 do {
                     _ = try await model.embed("tea", for: .document)
                     exit(5)
-                } catch let error as EmbeddingError where error.kind == .unavailable {
-                    exit(0)
-                }
+                } catch let error as EmbeddingError where error.kind == .unavailable {}
+                do {
+                    try await model.prewarm()
+                    exit(8)
+                } catch let error as EmbeddingError where error.kind == .unavailable {}
+                exit(0)
+            }
+        }
+
+        @Test("After the exit handler runs, a model that isn't loaded fails to load")
+        func loadAfterShutdown() async {
+            await #expect(processExitsWith: .success) {
+                _ = try await LlamaEmbeddingModelExitTests.loadedModel()
+                LlamaLifecycle.shared.shutDown()
+                // Another version has its own loader, so it loads the file again.
+                let other = LlamaEmbeddingModel(
+                    modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "2",
+                    dimension: 384
+                )
+                do {
+                    try await other.prewarm()
+                    exit(5)
+                } catch let error as EmbeddingError where error.kind == .unavailable {}
+                guard other.availability == .unavailable(.exiting) else { exit(6) }
+                exit(0)
             }
         }
     }
