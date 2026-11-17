@@ -390,8 +390,38 @@
     // MARK: - Runtime
 
     /// The state that llama.cpp keeps for the whole process.
-    private enum LlamaRuntime {
+    enum LlamaRuntime {
         static let logLevel = Locked(LlamaEmbeddingModel.LogLevel.warn)
+
+        /// The key of a thread-local value that is set
+        /// if the callback wrote the last message on the thread that wasn't a continuation.
+        ///
+        /// llama.cpp writes a message and its continuations from one thread,
+        /// and messages from other threads can come in between.
+        private static let continuationKey: pthread_key_t = {
+            var key = pthread_key_t()
+            precondition(pthread_key_create(&key, nil) == 0, "Failed to create a thread-local key.")
+            return key
+        }()
+
+        /// Returns whether the callback writes a message,
+        /// and records the decision for the message's continuations
+        /// on the current thread.
+        ///
+        /// A continuation has no level of its own,
+        /// so it follows the decision for the last message on the same thread,
+        /// even if the level changed after that message.
+        /// At ``LlamaEmbeddingModel/LogLevel/none``, no message is written.
+        static func shouldWrite(level: ggml_log_level, minimum: LlamaEmbeddingModel.LogLevel) -> Bool {
+            let writes: Bool
+            if level == GGML_LOG_LEVEL_CONT {
+                writes = pthread_getspecific(continuationKey) != nil
+            } else {
+                writes = minimum != .none && level.rawValue >= minimum.ggmlLevel.rawValue
+                pthread_setspecific(continuationKey, writes ? UnsafeRawPointer(bitPattern: 1) : nil)
+            }
+            return writes && minimum != .none
+        }
 
         /// Initializes the llama.cpp backend once,
         /// and installs the log callback first,
@@ -438,6 +468,8 @@
     ///
     /// A C callback can't capture Swift context,
     /// so this function reads the level from ``LlamaRuntime``.
+    /// Besides the write, each message costs one lock and unlock to read the level,
+    /// and one or two reads or writes of a thread-local value.
     private func llamaLogCallback(
         level: ggml_log_level,
         text: UnsafePointer<CChar>?,
@@ -447,9 +479,7 @@
             LlamaTestHooks.onLog.withLock { $0 }?()
         #endif
         let minimum = LlamaRuntime.logLevel.withLock { $0 }
-        // A continuation of the previous message has no level of its own.
-        guard minimum != .none, level != GGML_LOG_LEVEL_CONT else { return }
-        guard level.rawValue >= minimum.ggmlLevel.rawValue, let text else { return }
+        guard LlamaRuntime.shouldWrite(level: level, minimum: minimum), let text else { return }
         fputs(String(cString: text), stderr)
     }
 
