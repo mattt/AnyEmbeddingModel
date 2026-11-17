@@ -425,6 +425,29 @@
                 await ExitTestTimer.finish("exitFromLogDuringCleanup", watchdog, measuring: false)
             }
 
+            @Test("A cleanup that blocks at exit aborts the process instead of hanging")
+            func exitWithBlockedCleanup() async throws {
+                // A log callback blocks while the exit handler frees the model,
+                // so the cleanup watchdog aborts the process.
+                let name = "exitWithBlockedCleanup"
+                let watchdog = ExitTestTimer.watch(name)
+                await #expect(processExitsWith: .signal(SIGABRT)) {
+                    ExitTestTimer.childStarted("exitWithBlockedCleanup")
+                    let model = try await LlamaEmbeddingModelExitTests.loadedModel()
+                    LlamaTestHooks.onLog.withLock {
+                        $0 = {
+                            if LlamaLifecycle.shared.isStopping {
+                                while true { sleep(60) }
+                            }
+                        }
+                    }
+                    ExitTestTimer.stepStarted("exitWithBlockedCleanup")
+                    withExtendedLifetime(model) { exit(0) }
+                }
+                let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
+                #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
+            }
+
             @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")
             func workAfterShutdown() async {
                 let watchdog = ExitTestTimer.watch("workAfterShutdown")
