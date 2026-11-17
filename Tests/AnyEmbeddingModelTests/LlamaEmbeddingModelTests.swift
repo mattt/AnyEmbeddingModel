@@ -467,6 +467,24 @@
                         exit(5)
                     } catch let error as EmbeddingError where error.kind == .unavailable {}
                     guard other.availability == .unavailable(.exiting) else { exit(6) }
+                    // The exit error comes before every other check of a request:
+                    // a missing file, an empty input, and whitespace.
+                    let missing = LlamaEmbeddingModel(
+                        modelPath: "/nonexistent/model.gguf",
+                        name: "missing",
+                        version: "1",
+                        dimension: 384
+                    )
+                    do {
+                        try await missing.prewarm()
+                        exit(7)
+                    } catch let error as EmbeddingError where error.kind == .unavailable {}
+                    for input in [[], [" "]] as [[String]] {
+                        do {
+                            _ = try await missing.embed(input, for: .document)
+                            exit(8)
+                        } catch let error as EmbeddingError where error.kind == .unavailable {}
+                    }
                     exit(0)
                 }
                 _ = await ExitTestTimer.finish("loadAfterShutdown", watchdog)

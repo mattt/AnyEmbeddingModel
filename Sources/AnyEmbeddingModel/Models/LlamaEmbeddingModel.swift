@@ -273,10 +273,10 @@
         ///   if the model produces vectors of another size than ``dimension``,
         ///   or ``EmbeddingError/Kind/unavailable`` if the process is exiting.
         public func prewarm() async throws {
-            let engine = try await loader.container()
-            // A model that loaded before the exit handler started is in the cache,
-            // but it can't embed now.
+            // After the exit handler starts, every request throws the exit error first,
+            // even for a missing file or a model that is in the cache.
             try LlamaLifecycle.shared.stopIfExiting()
+            let engine = try await loader.container()
             guard engine.dimension == dimension else {
                 throw EmbeddingError.dimensionMismatch(expected: dimension, actual: engine.dimension)
             }
@@ -313,7 +313,14 @@
         ///
         /// The model puts as many texts in each call to llama.cpp
         /// as ``maximumBatchSize`` and the token limit of a call allow.
+        ///
+        /// After the package's exit handler starts,
+        /// this method throws ``EmbeddingError/Kind/unavailable`` for every input,
+        /// including an empty array.
         public func embed(_ texts: [String], for purpose: EmbeddingPurpose) async throws -> [[Float]] {
+            // After the exit handler starts, every request throws the exit error first,
+            // before the checks of its input.
+            try LlamaLifecycle.shared.stopIfExiting()
             try Vectors.validate(texts)
             guard !texts.isEmpty else { return [] }
             let engine = try await loader.container()
@@ -327,6 +334,7 @@
         /// Returns the token IDs that the model reads for each text,
         /// with the prefix for `purpose` and after truncation.
         func tokenIDs(for texts: [String], purpose: EmbeddingPurpose) async throws -> [[Int32]] {
+            try LlamaLifecycle.shared.stopIfExiting()
             let engine = try await loader.container()
             let limit = engine.tokenLimit(for: contextSettings)
             let inputs = texts.map { prefixes.apply(to: $0, for: purpose) }
