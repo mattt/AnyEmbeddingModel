@@ -28,23 +28,48 @@
     ///
     /// ggml's Metal backend stops a process with an assertion
     /// if the process exits while a model is still loaded on the GPU.
-    /// The package tries to prevent this in an exit handler,
-    /// which stops new work, waits a short time for running work,
-    /// and frees the models that it loaded if no work is still running.
-    /// The handler can't help in these cases,
-    /// and the process can still stop with the assertion:
+    /// So the model registers an exit handler when a load ends,
+    /// which stops new loads and embeddings,
+    /// waits up to three seconds for running work,
+    /// and then frees every model that the package loaded.
+    /// After the handler starts, every request throws
+    /// ``EmbeddingError/Kind/unavailable`` before any other check.
+    /// The handler can't help in these cases:
     ///
-    /// - An exit during the first load,
-    ///   because the handler is registered when a load ends.
-    /// - An exit from inside a llama.cpp call or callback.
-    /// - Work that is still running after ``LlamaLifecycle/exitDeadline``.
+    /// - An exit during the first load.
+    /// - An exit from inside a load, an embedding, or the release of a model,
+    ///   such as from a llama.cpp callback.
+    ///   An exit from a llama.cpp callback on a thread
+    ///   that runs no load, embedding, or release,
+    ///   such as a thread that llama.cpp or another library owns,
+    ///   makes the handler wait the full three seconds and then free nothing.
+    /// - Work that is still running after three seconds.
     /// - An exit that runs no exit handlers, such as `_exit` or a crash.
+    ///
+    /// If freeing the models takes more than ten seconds,
+    /// the handler aborts the process, so that the exit can't hang.
+    /// A crash report shows `abortAfterExitCleanupTimeout()` in its backtrace,
+    /// which first tries to write one line to standard error.
+    /// If the cleanup ends just after the limit,
+    /// the cleanup's thread can abort first, without the line,
+    /// and the backtrace shows `abortAfterLateExitCleanup()`.
     ///
     /// To be certain that no model is loaded when the process exits,
     /// finish every load, ``prewarm()``, and embedding,
     /// start no new work, and then call ``removeAllFromCache()``.
     /// The call cancels a running load without waiting for it,
     /// and that load can still finish and cache its model.
+    ///
+    /// To be certain that the assertion can't happen,
+    /// set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
+    /// before the first model loads,
+    /// in the process's environment or with `setenv` before the first request,
+    /// because the model starts the llama.cpp backend at the first load.
+    /// llama.cpp's Metal backend then doesn't use residency sets,
+    /// so a process exits normally even with a model loaded on the GPU.
+    /// The cost is that the system can reclaim a model's GPU memory
+    /// while the GPU is idle, and the next request waits for it again.
+    /// This package doesn't set the variable.
     ///
     /// The package can't tell whether a file has changed,
     /// so ``version`` is your promise:
@@ -555,14 +580,30 @@
     /// - An exit during the first load or its first context,
     ///   because the handler is registered when a load ends.
     ///   An earlier registration would run after ggml's objects are destroyed.
-    /// - An exit from inside a llama.cpp call or callback.
-    ///   The handler sees that its thread is running an operation
-    ///   and returns without waiting.
+    /// - An exit from inside a load, an embedding, or a cleanup,
+    ///   such as from a llama.cpp callback.
+    ///   The handler sees that its thread is running that work,
+    ///   which can't end while the handler waits,
+    ///   and returns at once without freeing anything.
+    ///   On a thread that has no mark,
+    ///   such as a thread that llama.cpp or another library owns,
+    ///   the handler can't see this,
+    ///   so it waits until the deadline and then frees nothing.
     /// - Work that is still running at the deadline.
     /// - An exit that runs no exit handlers, such as `_exit` or a crash.
     ///
+    /// The cleanup runs under ``withAbortDeadline(_:_:)``,
+    /// so that a cleanup that blocks aborts the process after ``cleanupDeadline``
+    /// instead of hanging it.
+    ///
     /// After the handler starts, every load and embedding throws
     /// ``EmbeddingError/Kind/unavailable``.
+    ///
+    /// Nothing here calls llama.cpp with a lock held.
+    /// llama.cpp logs while it frees a model,
+    /// and runs the log callback on the same thread,
+    /// so a callback that calls `exit` would run the exit handler on that thread,
+    /// and a lock that isn't recursive would then never be released.
     final class LlamaLifecycle: @unchecked Sendable {
         static let shared = LlamaLifecycle()
 

@@ -241,29 +241,67 @@ to release them.
 ggml's Metal backend stops a process with an assertion
 if the process exits while a model is still loaded on the GPU,
 even when the process uses llama.cpp directly.
-The package tries to prevent this with an exit handler.
+So `LlamaEmbeddingModel` registers an exit handler when a load ends.
 The handler stops new loads and embeddings,
-and waits up to three seconds for running ones to stop.
+waits up to three seconds for running ones to stop,
+and then frees every model and cached context that the package loaded.
 A running embedding stops between texts while it tokenizes them
 and between batches.
-If no work is running then, the handler frees every model that the package loaded.
-If work is still running at that time, the handler frees nothing,
-so the process ends as it would without the handler.
-The handler can't help in these cases:
+After the handler starts, every request throws
+`EmbeddingError` with the kind `unavailable`, before any other check.
 
-- An exit during the first load,
+The handler is best effort.
+The process can still stop with the assertion in these cases:
+
+- It exits during the first load,
   because the handler is registered when a load ends.
-- An exit from inside a llama.cpp call or callback.
-- Work that is still running after three seconds.
-- An exit that runs no exit handlers, such as `_exit` or a crash.
-- Models that other code loads with llama.cpp,
+- It exits from inside a load, an embedding, or the release of a model,
+  for example from a llama.cpp callback.
+  That work can't end while the handler waits,
+  so the handler returns at once and frees nothing.
+  An exit from a llama.cpp callback on a thread
+  that llama.cpp or another library owns
+  isn't recognized as inside that work,
+  so the handler waits the full three seconds and then frees nothing.
+- Work is still running after three seconds.
+  The handler then frees nothing.
+- It exits without running exit handlers,
+  for example with `_exit` or after a crash.
+- Other code loaded the models with llama.cpp,
   such as AnyLanguageModel's `LlamaLanguageModel`.
+
+If freeing the models takes more than ten seconds,
+for example because another library's log callback blocks,
+the handler aborts the process, so that the exit can't hang.
+A crash report for this abort shows
+`LlamaLifecycle.abortAfterExitCleanupTimeout()` in its backtrace,
+which first tries to write one line to standard error,
+but aborts whether or not the line can be written.
+If the cleanup ends just after the limit,
+the cleanup's own thread can abort first,
+without the line,
+and the backtrace shows `LlamaLifecycle.abortAfterLateExitCleanup()`.
 
 To be certain that no model is loaded when the process exits,
 finish every load, `prewarm()`, and embedding,
 start no new work, and then call `LlamaEmbeddingModel.removeAllFromCache()`.
 The call cancels a running load without waiting for it,
 and that load can still finish and cache its model.
+
+To be certain that the assertion can't happen,
+set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
+before the first model loads.
+llama.cpp's Metal backend then doesn't use residency sets,
+so a process exits normally even with a model loaded on the GPU.
+Set it in the process's environment,
+or call `setenv("GGML_METAL_NO_RESIDENCY", "1", 1)`
+before the first embedding or `prewarm()`,
+because `LlamaEmbeddingModel` starts the llama.cpp backend at the first load.
+If another library in the process uses llama.cpp, set it before that library loads a model.
+The cost is that residency sets keep a model's GPU memory wired between requests;
+without them, the system can reclaim that memory while the GPU is idle,
+and the next request waits for it again.
+This package doesn't set the variable.
 
 llama.cpp writes warnings and errors to standard error.
 Set `LlamaEmbeddingModel.logLevel` to change the level.
