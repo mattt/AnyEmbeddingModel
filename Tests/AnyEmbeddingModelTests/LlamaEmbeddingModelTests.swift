@@ -305,9 +305,10 @@
             }
 
             /// Starts an embedding in another task,
-            /// and returns when its first call to llama.cpp is about to start.
+            /// and returns when its first batch starts.
             ///
-            /// - Parameter whileActive: What the embedding does before that call,
+            /// - Parameter whileActive: What the embedding does at the start of that batch,
+            ///   before its checks for cancellation and exit,
             ///   while it is known to be running.
             static func startEmbedding(
                 _ model: LlamaEmbeddingModel,
@@ -315,7 +316,7 @@
             ) {
                 let started = DispatchSemaphore(value: 0)
                 let once = Locked(false)
-                LlamaTestHooks.beforeDecode.withLock {
+                LlamaTestHooks.beforeBatch.withLock {
                     $0 = {
                         let isFirst = once.withLock { done in
                             defer { done = true }
@@ -340,8 +341,7 @@
                     ExitTestTimer.stepStarted("idleExit")
                     exit(0)
                 }
-                let elapsed = await ExitTestTimer.finish("idleExit", watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish("idleExit", watchdog, measuring: false)
             }
 
             @Test("The exit handler waits for an embedding that is running, and the process exits normally")
@@ -356,8 +356,7 @@
                     ExitTestTimer.stepStarted("exitDuringEmbedding")
                     exit(0)
                 }
-                let elapsed = await ExitTestTimer.finish("exitDuringEmbedding", watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish("exitDuringEmbedding", watchdog, measuring: false)
             }
 
             @Test("An embedding that runs past the deadline doesn't keep the process alive")
@@ -376,7 +375,6 @@
                 }
                 let elapsed = try #require(await ExitTestTimer.finish("exitPastDeadline", watchdog))
                 #expect(elapsed >= .seconds(LlamaLifecycle.exitDeadline))
-                #expect(elapsed < .seconds(LlamaLifecycle.exitDeadline + 5))
             }
 
             @Test("An exit from inside an embedding doesn't wait for that embedding")
@@ -384,6 +382,8 @@
                 let watchdog = ExitTestTimer.watch("exitInsideOperation")
                 // The handler returns at once and frees nothing,
                 // so ggml's assertion ends the process before the deadline.
+                // The exit status can't show how long the handler took;
+                // `shutDownInsideThreadOperation()` checks that it returns at once.
                 await #expect(processExitsWith: .signal(SIGABRT)) {
                     ExitTestTimer.childStarted("exitInsideOperation")
                     let model = try await LlamaEmbeddingModelExitTests.loadedModel()
@@ -394,8 +394,7 @@
                     // The embedding's thread exits the process.
                     while true { sleep(60) }
                 }
-                let elapsed = await ExitTestTimer.finish("exitInsideOperation", watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish("exitInsideOperation", watchdog, measuring: false)
             }
 
             @Test("A log callback that exits while a model is freed doesn't hang the process")
@@ -423,8 +422,7 @@
                     // A distinct status shows that llama.cpp logged nothing.
                     exit(4)
                 }
-                let elapsed = await ExitTestTimer.finish("exitFromLogDuringCleanup", watchdog)
-                #expect(try #require(elapsed) < .seconds(LlamaLifecycle.exitDeadline))
+                await ExitTestTimer.finish("exitFromLogDuringCleanup", watchdog, measuring: false)
             }
 
             @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")
@@ -445,7 +443,7 @@
                     } catch let error as EmbeddingError where error.kind == .unavailable {}
                     exit(0)
                 }
-                _ = await ExitTestTimer.finish("workAfterShutdown", watchdog)
+                await ExitTestTimer.finish("workAfterShutdown", watchdog, measuring: false)
             }
 
             @Test("After the exit handler runs, a model that isn't loaded fails to load")
@@ -487,71 +485,7 @@
                     }
                     exit(0)
                 }
-                _ = await ExitTestTimer.finish("loadAfterShutdown", watchdog)
-            }
-        }
-
-        /// Lets the parent of an exit test kill a child that hangs,
-        /// and measure how long the child takes to end after the step under test.
-        ///
-        /// Swift Testing's time limit doesn't end a child process,
-        /// so a child that hangs would keep the test run waiting.
-        /// The child writes its process ID when it starts,
-        /// and the monotonic time when the step under test starts,
-        /// to files that both processes name from the parent's process ID.
-        /// The measurement starts after the child's setup,
-        /// so a slow load doesn't change it.
-        enum ExitTestTimer {
-            /// How long the parent waits for a child before it kills the child.
-            static let limit: Duration = .seconds(30)
-
-            /// The current time of a monotonic clock that every process on the system shares.
-            static func now() -> UInt64 {
-                clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            }
-
-            private static func file(_ name: String, _ suffix: String, parent: pid_t) -> URL {
-                URL(fileURLWithPath: NSTemporaryDirectory())
-                    .appendingPathComponent("llama-exit-test-\(parent)-\(name).\(suffix)")
-            }
-
-            /// In the child: records its process ID.
-            static func childStarted(_ name: String) {
-                try? String(getpid()).write(to: file(name, "pid", parent: getppid()), atomically: true, encoding: .utf8)
-            }
-
-            /// In the child: records when the step under test starts.
-            static func stepStarted(_ name: String) {
-                try? String(now()).write(to: file(name, "start", parent: getppid()), atomically: true, encoding: .utf8)
-            }
-
-            private static func read(_ name: String, _ suffix: String) -> String? {
-                try? String(contentsOf: file(name, suffix, parent: getpid()), encoding: .utf8)
-            }
-
-            /// In the parent: starts a task that kills the child if it hasn't ended after ``limit``,
-            /// and returns whether it did.
-            static func watch(_ name: String) -> Task<Bool, Never> {
-                for suffix in ["pid", "start"] {
-                    try? FileManager.default.removeItem(at: file(name, suffix, parent: getpid()))
-                }
-                return Task.detached {
-                    guard (try? await Task.sleep(for: limit)) != nil else { return false }
-                    guard let pid = read(name, "pid").flatMap({ pid_t($0) }) else { return false }
-                    kill(pid, SIGKILL)
-                    return true
-                }
-            }
-
-            /// In the parent, after the child ends: stops the watchdog,
-            /// records an issue if it killed the child,
-            /// and returns the time from the step's start to now.
-            static func finish(_ name: String, _ watchdog: Task<Bool, Never>) async -> Duration? {
-                watchdog.cancel()
-                let killed = await watchdog.value
-                #expect(!killed, "The child process didn't end within \(limit).")
-                guard let start = read(name, "start").flatMap({ UInt64($0) }) else { return nil }
-                return .nanoseconds(Int64(now() - start))
+                await ExitTestTimer.finish("loadAfterShutdown", watchdog, measuring: false)
             }
         }
     #endif

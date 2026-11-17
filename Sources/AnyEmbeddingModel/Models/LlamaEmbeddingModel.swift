@@ -725,8 +725,15 @@
         /// Only debug builds, which `swift test` uses, compile these hooks,
         /// so they cost nothing in a release build.
         enum LlamaTestHooks {
-            /// Runs before each call to `llama_decode`, on the embedding's thread.
-            static let beforeDecode = Locked<(@Sendable () -> Void)?>(nil)
+            /// Runs at the start of each batch of an embedding,
+            /// before its checks for cancellation and exit,
+            /// on the embedding's thread.
+            ///
+            /// After the hook returns,
+            /// the embedding does no llama.cpp work before those checks,
+            /// so an embedding that the hook holds until the exit handler starts
+            /// stops at once.
+            static let beforeBatch = Locked<(@Sendable () -> Void)?>(nil)
 
             /// Runs for each llama.cpp log message, before the level filter,
             /// on the thread that logs it.
@@ -1002,6 +1009,9 @@
             var vectors: [[Float]] = []
             vectors.reserveCapacity(inputs.count)
             for group in groups {
+                #if DEBUG
+                    LlamaTestHooks.beforeBatch.withLock { $0 }?()
+                #endif
                 try Task.checkCancellation()
                 try LlamaLifecycle.shared.stopIfExiting()
                 vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
@@ -1065,9 +1075,6 @@
             if let memory = llama_get_memory(context) {
                 llama_memory_clear(memory, true)
             }
-            #if DEBUG
-                LlamaTestHooks.beforeDecode.withLock { $0 }?()
-            #endif
             // llama_decode runs the encoder for a model without a cache, such as BERT.
             guard llama_decode(context, batch) == 0 else {
                 throw LlamaEmbeddingModelError.decodingFailed
