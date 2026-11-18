@@ -493,7 +493,9 @@
         /// ggml doesn't report when it creates such an object,
         /// so the package can't tell whether an earlier registration still runs early enough.
         /// So every load registers the handler again when it ends,
-        /// and so does each model's first embedding, which compiles ggml's GPU kernels.
+        /// and so does each model's first embedding that runs a batch,
+        /// which compiles ggml's GPU kernels,
+        /// when it ends, even if it throws.
         /// The last registration runs first, and the handler does nothing after its first run.
         ///
         /// If a registration fails,
@@ -1073,7 +1075,7 @@
         /// The context length that the model was trained with, or `nil` if the file doesn't say.
         let trainedContextLength: Int?
 
-        /// Whether an embedding has run, which registers the exit handler again.
+        /// Whether an embedding has run a batch and then registered the exit handler again.
         private let hasEmbedded = Locked(false)
 
         /// Loads the model and checks that it produces one vector for each text.
@@ -1217,6 +1219,14 @@
                 tokenCapacity: capacity,
                 sequenceCapacity: sequenceCapacity(for: settings)
             )
+            // The first batch can create ggml's GPU objects,
+            // so register the exit handler after it, as a load does,
+            // even if a later batch throws or the task is cancelled.
+            // The registration runs before `perform(_:)` stops counting this embedding.
+            var hasRunBatch = false
+            defer {
+                if hasRunBatch { registerExitHandlerAfterFirstEmbedding() }
+            }
             var vectors: [[Float]] = []
             vectors.reserveCapacity(inputs.count)
             for group in groups {
@@ -1225,16 +1235,23 @@
                 #endif
                 try Task.checkCancellation()
                 try LlamaLifecycle.shared.stopIfExiting()
+                hasRunBatch = true
                 vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
             }
-            let isFirstEmbedding = hasEmbedded.withLock { hasEmbedded in
-                defer { hasEmbedded = true }
-                return !hasEmbedded
-            }
-            if isFirstEmbedding {
-                LlamaRuntime.registerExitHandler()
-            }
             return vectors
+        }
+
+        /// Registers the exit handler again after the model's first batch.
+        ///
+        /// The registration happens under the lock,
+        /// so that no other embedding finds the first embedding done
+        /// before the handler is registered.
+        private func registerExitHandlerAfterFirstEmbedding() {
+            hasEmbedded.withLock { hasEmbedded in
+                guard !hasEmbedded else { return }
+                LlamaRuntime.registerExitHandler()
+                hasEmbedded = true
+            }
         }
 
         /// Splits texts into consecutive groups,

@@ -304,6 +304,12 @@
                 }
             }
 
+            /// Waits up to ten seconds for `semaphore`,
+            /// and exits with `status` if it isn't signaled by then.
+            static func waitOrExit(for semaphore: DispatchSemaphore, status: CInt) {
+                if semaphore.wait(timeout: .now() + 10) == .timedOut { _exit(status) }
+            }
+
             /// Starts an embedding in another task,
             /// and returns when its first batch starts.
             ///
@@ -446,6 +452,55 @@
                 }
                 let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
                 #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
+            }
+
+            @Test("A process exits normally after its first embedding is cancelled after one batch")
+            func exitAfterCancelledFirstEmbedding() async throws {
+                let watchdog = ExitTestTimer.watch("exitAfterCancelledFirstEmbedding")
+                await #expect(processExitsWith: .success) {
+                    ExitTestTimer.childStarted("exitAfterCancelledFirstEmbedding")
+                    // Load the model without an embedding, so that the next one is the first.
+                    let model = LlamaEmbeddingModel(
+                        modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                        name: "bge-small-en-v1.5-q8_0",
+                        version: "1",
+                        dimension: 384,
+                        maximumBatchSize: 1
+                    )
+                    try await model.prewarm()
+                    let secondBatch = DispatchSemaphore(value: 0)
+                    let cancelled = DispatchSemaphore(value: 0)
+                    let batches = Locked(0)
+                    LlamaTestHooks.beforeBatch.withLock {
+                        $0 = {
+                            let batch = batches.withLock { count in
+                                count += 1
+                                return count
+                            }
+                            guard batch == 2 else { return }
+                            // Hold the second batch until the task is cancelled,
+                            // so that the embedding stops after exactly one batch.
+                            secondBatch.signal()
+                            // A distinct status shows that the test never cancelled the task.
+                            if cancelled.wait(timeout: .now() + 10) == .timedOut { _exit(3) }
+                        }
+                    }
+                    let task = Task.detached {
+                        try await model.embed(LlamaEmbeddingModelExitTests.texts, for: .document)
+                    }
+                    // A distinct status shows that the second batch never started.
+                    LlamaEmbeddingModelExitTests.waitOrExit(for: secondBatch, status: 4)
+                    task.cancel()
+                    cancelled.signal()
+                    do {
+                        _ = try await task.value
+                        exit(5)
+                    } catch is CancellationError {}
+                    guard batches.withLock({ $0 }) == 2 else { exit(6) }
+                    ExitTestTimer.stepStarted("exitAfterCancelledFirstEmbedding")
+                    withExtendedLifetime(model) { exit(0) }
+                }
+                await ExitTestTimer.finish("exitAfterCancelledFirstEmbedding", watchdog, measuring: false)
             }
 
             @Test("A cache removal after shutdown takes a model leaves its cleanup to shutdown")
