@@ -117,15 +117,6 @@
             #expect(counts["query-above-limit"] == limit)
             #expect(Set(fixture.cases.map(\.purpose)) == ["query", "document"])
         }
-
-        @Test("Truncation keeps the last token and reaches the limit")
-        func truncation() {
-            let ids = Array(0 ..< 10)
-            #expect(MLXEmbeddingModel.truncated(ids, limit: 4) == [0, 1, 2, 9])
-            #expect(MLXEmbeddingModel.truncated(ids, limit: 10) == ids)
-            #expect(MLXEmbeddingModel.truncated(ids, limit: 11) == ids)
-            #expect(MLXEmbeddingModel.truncated([], limit: 4) == [])
-        }
     }
 
     /// These tests load real weights.

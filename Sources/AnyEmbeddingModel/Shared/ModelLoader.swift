@@ -15,14 +15,17 @@ struct ModelLoaderKey: Hashable, Sendable {
 
         /// A directory on disk.
         case directory
+
+        /// A single file on disk.
+        case file
     }
 
     let source: Source
 
-    /// The UTF-8 bytes of the repository of a hub model, or of the path of a directory.
+    /// The UTF-8 bytes of the repository of a hub model, or of the path of a directory or a file.
     let location: [UInt8]
 
-    /// The UTF-8 bytes of the commit of a hub model, or of the version of a directory.
+    /// The UTF-8 bytes of the commit of a hub model, or of the version of a directory or a file.
     let version: [UInt8]
 
     /// The client that downloads a hub model, if the caller supplied one.

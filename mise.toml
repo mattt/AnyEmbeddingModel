@@ -20,6 +20,10 @@ run = "mise run _swift -- build --force-resolved-versions"
 description = "Build the library with the MLX trait"
 run = "mise run _swift:mlx -- build --force-resolved-versions --traits MLX"
 
+[tasks."build:llama"]
+description = "Build the library with the Llama trait"
+run = "mise run _swift -- build --force-resolved-versions --traits Llama"
+
 [tasks."build:ios"]
 description = "Compile the library for iOS"
 run = "xcodebuild build -scheme AnyEmbeddingModel -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO -quiet"
@@ -73,6 +77,10 @@ mise run _swift:mlx -- test --skip-build "${options[@]}" "$@"
 description = "Run the MLX tests with real models from the Hugging Face Hub"
 env = { ANY_EMBEDDING_MODEL_TEST_HUB = "1" }
 run = "mise run test:mlx"
+
+[tasks."test:llama"]
+description = "Run the library tests with the Llama trait, and with a GGUF model if LLAMA_EMBEDDING_MODEL_PATH is set"
+run = "mise run _swift -- test --force-resolved-versions --traits Llama"
 
 [tasks.lint]
 description = "Check the formatting and lint rules"

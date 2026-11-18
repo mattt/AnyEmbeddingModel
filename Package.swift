@@ -21,6 +21,10 @@ let package = Package(
             description: "Enables MLXEmbeddingModel, which runs embedding models with MLX."
         ),
         .trait(
+            name: "Llama",
+            description: "Enables LlamaEmbeddingModel, which runs GGUF embedding models with llama.cpp."
+        ),
+        .trait(
             name: "AsyncHTTPClient",
             description: "Sends OpenAIEmbeddingModel's requests with AsyncHTTPClient by default."
         ),
@@ -33,6 +37,7 @@ let package = Package(
             traits: []
         ),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),
+        .package(url: "https://github.com/mattt/llama.swift", .upToNextMajor(from: "3.0.0")),
         .package(url: "https://github.com/huggingface/swift-huggingface", from: "1.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.26.0"),
         .package(url: "https://github.com/apple/swift-http-types", from: "1.5.0"),
@@ -74,6 +79,11 @@ let package = Package(
                     name: "Tokenizers",
                     package: "swift-transformers",
                     condition: .when(traits: ["MLX"])
+                ),
+                .product(
+                    name: "LlamaSwift",
+                    package: "llama.swift",
+                    condition: .when(traits: ["Llama"])
                 ),
                 .product(
                     name: "AsyncHTTPClient",
