@@ -57,8 +57,11 @@
     /// To be certain that no model is loaded when the process exits,
     /// finish every load, ``prewarm()``, and embedding,
     /// start no new work, and then call ``removeAllFromCache()``.
-    /// The call cancels a running load without waiting for it,
-    /// and that load can still finish and cache its model.
+    /// The call doesn't wait for a running load.
+    /// That load can still finish,
+    /// and the callers that already wait for it still receive its model
+    /// and keep it loaded until they release it,
+    /// but the load doesn't put the model back in the cache.
     ///
     /// To be certain that the assertion can't happen,
     /// set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
@@ -131,8 +134,11 @@
         /// because llama.cpp doesn't protect the callback against concurrent changes.
         /// Setting this property changes only the level that the callback reads.
         ///
-        /// AnyLanguageModel's `LlamaLanguageModel.logLevel` installs its own callback,
-        /// and the callback that was installed last decides which messages appear.
+        /// AnyLanguageModel's `LlamaLanguageModel` also installs its own callback once,
+        /// before its own first llama.cpp call.
+        /// The callback that was installed last decides which messages appear,
+        /// and changing either package's level afterward
+        /// doesn't install or replace a callback.
         public static var logLevel: LogLevel {
             get { LlamaRuntime.logLevel.withLock { $0 } }
             set { LlamaRuntime.logLevel.withLock { $0 = newValue } }
@@ -327,8 +333,11 @@
         /// To be certain that no model is loaded when the process exits,
         /// finish every load, ``prewarm()``, and embedding,
         /// start no new work, and then call this method.
-        /// It cancels a running load without waiting for it,
-        /// and that load can still finish and cache its model.
+        /// It doesn't wait for a running load.
+        /// That load can still finish,
+        /// and the callers that already wait for it still receive its model
+        /// and keep it loaded until they release it,
+        /// but the load doesn't put the model back in the cache.
         /// The package's exit handler is best effort; see ``LlamaEmbeddingModel``.
         public static func removeAllFromCache() async {
             LlamaLoaderRegistry.unloadAll()

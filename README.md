@@ -285,8 +285,11 @@ and the backtrace shows `LlamaLifecycle.abortAfterLateExitCleanup()`.
 To be certain that no model is loaded when the process exits,
 finish every load, `prewarm()`, and embedding,
 start no new work, and then call `LlamaEmbeddingModel.removeAllFromCache()`.
-The call cancels a running load without waiting for it,
-and that load can still finish and cache its model.
+The call doesn't wait for a running load.
+That load can still finish,
+and the callers that already wait for it still receive its model
+and keep it loaded until they release it,
+but the load doesn't put the model back in the cache.
 
 To be certain that the assertion can't happen,
 set the environment variable `GGML_METAL_NO_RESIDENCY` to any value
@@ -308,9 +311,11 @@ Set `LlamaEmbeddingModel.logLevel` to change the level.
 llama.cpp has one log callback for the whole process.
 The package installs its callback once, before its first load,
 and the level applies to every llama.cpp message after that.
-AnyLanguageModel's `LlamaLanguageModel` installs its own callback
-when you set its `logLevel`,
-and the callback installed last decides which messages appear.
+AnyLanguageModel's `LlamaLanguageModel` also installs its own callback once,
+before its own first llama.cpp call.
+The callback installed last decides which messages appear,
+and changing either package's `logLevel` afterward
+doesn't install or replace a callback.
 
 The llama.cpp binary framework has slices only for macOS and iOS devices,
 so the `Llama` trait doesn't build for the iOS Simulator,
