@@ -738,20 +738,30 @@
             condition.withLock { resources[ObjectIdentifier(model)] = model }
         }
 
-        /// Frees the resources of a model, unless ``shutDown(deadline:)`` freed them already.
+        /// Frees the resources of a model,
+        /// unless ``shutDown(deadline:)`` has taken them to free.
+        ///
+        /// Exactly one caller frees each model's resources:
+        /// the caller that removes them from the registry under the lock.
+        /// If shutdown has taken them,
+        /// this method returns at once and leaves the cleanup to shutdown,
+        /// so that shutdown can't return while this thread still frees them.
         ///
         /// The cleanup runs even while the process is exiting.
         /// It counts as running work,
-        /// so that the exit handler's thread check and deadline apply to it,
+        /// so that the exit handler waits for it,
+        /// and its thread check and deadline apply to it,
         /// and it calls llama.cpp without the lock:
         /// llama.cpp logs while it frees a model,
         /// and a log callback that calls `exit` runs the exit handler on this thread,
         /// which takes the lock.
         func free(_ model: LlamaModelResources) {
-            condition.withLock {
-                resources[ObjectIdentifier(model)] = nil
+            let ownsCleanup = condition.withLock {
+                guard resources.removeValue(forKey: ObjectIdentifier(model)) != nil else { return false }
                 activeOperations += 1
+                return true
             }
+            guard ownsCleanup else { return }
             runCounted { model.free() }
         }
 
@@ -783,10 +793,15 @@
                 resources = [:]
                 return .freed
             }
+            // Shutdown now owns the cleanup of these models,
+            // and `free(_:)` leaves them alone.
             // Free without the lock, as in `free(_:)`.
             // If a log callback calls `exit` here, this handler runs again and does nothing.
             // With nothing to free, no watchdog starts.
             guard !models.isEmpty else { return result }
+            #if DEBUG
+                LlamaTestHooks.beforeShutdownCleanup.withLock { $0 }?()
+            #endif
             Self.withAbortDeadline(Self.cleanupDeadline) {
                 for model in models {
                     model.free()
@@ -914,6 +929,23 @@
 
             /// Runs on the cleanup watchdog's thread after its deadline passes.
             static let cleanupWatchdog = Locked<(@Sendable (CleanupWatchdogEvent) -> Void)?>(nil)
+
+            /// Runs in ``LlamaLifecycle/shutDown(deadline:)``
+            /// after shutdown has taken the models to free
+            /// and before it frees them,
+            /// on the shutdown's thread.
+            static let beforeShutdownCleanup = Locked<(@Sendable () -> Void)?>(nil)
+
+            /// A point in ``LlamaModelResources/free()``.
+            enum ResourceCleanupEvent: Sendable, Equatable {
+                /// The cleanup is about to call llama.cpp.
+                case willFree
+                /// The cleanup has freed the context and the model.
+                case didFree
+            }
+
+            /// Runs in ``LlamaModelResources/free()``, on the thread that frees.
+            static let resourceCleanup = Locked<(@Sendable (ResourceCleanupEvent) -> Void)?>(nil)
         }
     #endif
 
@@ -939,33 +971,36 @@
         let model: OpaquePointer
         let vocab: OpaquePointer
 
-        /// Guards `cachedContext` and `isFreed`.
+        /// Guards `cachedContext`.
         private let lock = NSLock()
         private var cachedContext: CachedContext?
-        private var isFreed = false
 
         init(model: OpaquePointer, vocab: OpaquePointer) {
             self.model = model
             self.vocab = vocab
         }
 
-        /// Frees the cached context and the model, once.
+        /// Frees the cached context and the model.
         ///
         /// Call it only through ``LlamaLifecycle``,
+        /// which calls it once, from the one caller that owns the cleanup,
         /// when no load or embedding uses the model.
         func free() {
             // Take the context under the lock, and call llama.cpp without it.
-            let (isFirst, context): (Bool, OpaquePointer?) = lock.withLock {
-                guard !isFreed else { return (false, nil) }
-                isFreed = true
+            let context: OpaquePointer? = lock.withLock {
                 defer { cachedContext = nil }
-                return (true, cachedContext?.context)
+                return cachedContext?.context
             }
-            guard isFirst else { return }
+            #if DEBUG
+                LlamaTestHooks.resourceCleanup.withLock { $0 }?(.willFree)
+            #endif
             if let context {
                 llama_free(context)
             }
             llama_model_free(model)
+            #if DEBUG
+                LlamaTestHooks.resourceCleanup.withLock { $0 }?(.didFree)
+            #endif
         }
 
         /// Puts a new context in the cache.

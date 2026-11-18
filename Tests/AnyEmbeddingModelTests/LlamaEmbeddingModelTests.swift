@@ -448,6 +448,61 @@
                 #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
             }
 
+            @Test("A cache removal after shutdown takes a model leaves its cleanup to shutdown")
+            func removalDuringShutdown() async {
+                let watchdog = ExitTestTimer.watch("removalDuringShutdown")
+                await #expect(processExitsWith: .success) {
+                    ExitTestTimer.childStarted("removalDuringShutdown")
+                    let model = try await LlamaEmbeddingModelExitTests.loadedModel()
+                    let shutdownThreadKey = "removalDuringShutdown.shutdownThread"
+                    // The number of cleanups that have started and not ended.
+                    let running = Locked(0)
+                    let release = DispatchSemaphore(value: 0)
+                    LlamaTestHooks.resourceCleanup.withLock {
+                        $0 = { event in
+                            switch event {
+                            case .willFree:
+                                running.withLock { $0 += 1 }
+                                // Hold a cleanup on any thread but shutdown's
+                                // until shutdown returns, or for at most two seconds.
+                                if Thread.current.threadDictionary[shutdownThreadKey] == nil {
+                                    _ = release.wait(timeout: .now() + 2)
+                                }
+                            case .didFree:
+                                running.withLock { $0 -= 1 }
+                            }
+                        }
+                    }
+                    LlamaTestHooks.beforeShutdownCleanup.withLock {
+                        $0 = {
+                            Thread.current.threadDictionary[shutdownThreadKey] = true
+                            // Shutdown has taken the model,
+                            // so release the engine on another thread now.
+                            let removed = DispatchSemaphore(value: 0)
+                            Task.detached {
+                                await model.removeFromCache()
+                                removed.signal()
+                            }
+                            // A removal that leaves the cleanup to shutdown returns at once.
+                            // Otherwise its cleanup is held, and shutdown goes on after a second.
+                            _ = removed.wait(timeout: .now() + 1)
+                        }
+                    }
+                    ExitTestTimer.stepStarted("removalDuringShutdown")
+                    let result = LlamaLifecycle.shared.shutDown()
+                    let stillRunning = running.withLock { $0 }
+                    release.signal()
+                    // `_exit` skips the exit handlers and static destructors,
+                    // which would race with a cleanup that is still running.
+                    guard result == .freed else { _exit(5) }
+                    // A distinct status shows that shutdown returned
+                    // while another thread still freed the model.
+                    guard stillRunning == 0 else { _exit(6) }
+                    exit(0)
+                }
+                await ExitTestTimer.finish("removalDuringShutdown", watchdog, measuring: false)
+            }
+
             @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")
             func workAfterShutdown() async {
                 let watchdog = ExitTestTimer.watch("workAfterShutdown")
