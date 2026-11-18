@@ -183,6 +183,29 @@
             }
         }
 
+        // The test uses a test hook, which only debug builds compile.
+        #if DEBUG
+            @Test("A missing vector in a later batch throws with the text's input index")
+            func missingVector() async throws {
+                // Two texts per call, so the text at index 3 is the second text of the second call.
+                let small = LlamaEmbeddingModel(
+                    modelPath: Self.path,
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+                    dimension: 384,
+                    prefixes: .bge,
+                    maximumBatchSize: 2
+                )
+                // This suite runs its tests one at a time,
+                // and no other suite embeds text in this process.
+                LlamaTestHooks.dropsVector.withLock { $0 = { $0 == 3 } }
+                defer { LlamaTestHooks.dropsVector.withLock { $0 = nil } }
+                await #expect(throws: EmbeddingError.noVector(index: 3)) {
+                    try await small.embed(Self.texts, for: .document)
+                }
+            }
+        #endif
+
         @Test("A related pair scores above an unrelated pair")
         func semantics() async throws {
             let query = try await model.embed("Where does my sister live?", for: .query)

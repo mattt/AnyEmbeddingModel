@@ -406,7 +406,10 @@
         /// llama.cpp couldn't tokenize a text.
         case tokenizationFailed
 
-        /// llama.cpp couldn't run a batch, or returned no vector for a text.
+        /// llama.cpp couldn't run a batch.
+        ///
+        /// If llama.cpp runs a batch but returns no vector for a text,
+        /// the model throws ``EmbeddingError/Kind/noVector`` instead.
         case decodingFailed
 
         public var errorDescription: String? {
@@ -917,6 +920,11 @@
             /// stops at once.
             static let beforeBatch = Locked<(@Sendable () -> Void)?>(nil)
 
+            /// Runs for each text after its batch,
+            /// with the index of the text in the caller's input,
+            /// and makes the embedding find no vector for the text if it returns true.
+            static let dropsVector = Locked<(@Sendable (Int) -> Bool)?>(nil)
+
             /// Runs for each llama.cpp log message, before the level filter,
             /// on the thread that logs it.
             static let onLog = Locked<(@Sendable () -> Void)?>(nil)
@@ -1236,7 +1244,12 @@
                 try Task.checkCancellation()
                 try LlamaLifecycle.shared.stopIfExiting()
                 hasRunBatch = true
-                vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
+                vectors += try run(
+                    group.map { tokens[$0] },
+                    firstIndex: group.lowerBound,
+                    batch: batch,
+                    context: context
+                )
             }
             return vectors
         }
@@ -1280,8 +1293,12 @@
         }
 
         /// Runs one call with one sequence for each text, and returns the pooled vectors.
+        ///
+        /// - Parameter firstIndex: The index of the first sequence's text in the caller's input,
+        ///   which an error for a missing vector reports.
         private func run(
             _ sequences: [[llama_token]],
+            firstIndex: Int,
             batch: llama_batch,
             context: OpaquePointer
         ) throws -> [[Float]] {
@@ -1308,8 +1325,14 @@
                 throw LlamaEmbeddingModelError.decodingFailed
             }
             return try sequences.indices.map { sequence in
-                guard let vector = llama_get_embeddings_seq(context, llama_seq_id(sequence)) else {
-                    throw LlamaEmbeddingModelError.decodingFailed
+                var vector = llama_get_embeddings_seq(context, llama_seq_id(sequence))
+                #if DEBUG
+                    if LlamaTestHooks.dropsVector.withLock({ $0 })?(firstIndex + sequence) == true {
+                        vector = nil
+                    }
+                #endif
+                guard let vector else {
+                    throw EmbeddingError.noVector(index: firstIndex + sequence)
                 }
                 return Array(UnsafeBufferPointer(start: vector, count: dimension))
             }
