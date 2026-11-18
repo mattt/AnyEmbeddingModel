@@ -134,11 +134,13 @@
         /// because llama.cpp doesn't protect the callback against concurrent changes.
         /// Setting this property changes only the level that the callback reads.
         ///
-        /// AnyLanguageModel's `LlamaLanguageModel` also installs its own callback once,
-        /// before its own first llama.cpp call.
-        /// The callback that was installed last decides which messages appear,
-        /// and changing either package's level afterward
-        /// doesn't install or replace a callback.
+        /// AnyLanguageModel's `LlamaLanguageModel` installs its own callback
+        /// each time its `logLevel` is set.
+        /// The callback that was installed last decides which messages appear.
+        /// So setting AnyLanguageModel's level after this package's first load
+        /// replaces this package's callback,
+        /// and this property then has no effect,
+        /// because this package doesn't install its callback again.
         public static var logLevel: LogLevel {
             get { LlamaRuntime.logLevel.withLock { $0 } }
             set { LlamaRuntime.logLevel.withLock { $0 = newValue } }

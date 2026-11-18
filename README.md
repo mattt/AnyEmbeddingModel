@@ -311,11 +311,13 @@ Set `LlamaEmbeddingModel.logLevel` to change the level.
 llama.cpp has one log callback for the whole process.
 The package installs its callback once, before its first load,
 and the level applies to every llama.cpp message after that.
-AnyLanguageModel's `LlamaLanguageModel` also installs its own callback once,
-before its own first llama.cpp call.
-The callback installed last decides which messages appear,
-and changing either package's `logLevel` afterward
-doesn't install or replace a callback.
+AnyLanguageModel's `LlamaLanguageModel` installs its own callback
+each time its `logLevel` is set.
+The callback installed last decides which messages appear.
+So setting AnyLanguageModel's `logLevel` after this package's first load
+replaces this package's callback,
+and `LlamaEmbeddingModel.logLevel` then has no effect,
+because this package doesn't install its callback again.
 
 The llama.cpp binary framework has slices only for macOS and iOS devices,
 so the `Llama` trait doesn't build for the iOS Simulator,
