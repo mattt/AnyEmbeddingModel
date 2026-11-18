@@ -183,6 +183,29 @@
             }
         }
 
+        // The test uses a test hook, which only debug builds compile.
+        #if DEBUG
+            @Test("A missing vector in a later batch throws with the text's input index")
+            func missingVector() async throws {
+                // Two texts per call, so the text at index 3 is the second text of the second call.
+                let small = LlamaEmbeddingModel(
+                    modelPath: Self.path,
+                    name: "bge-small-en-v1.5-q8_0",
+                    version: "f2068edd9b54f2a369549ccc71f70ed273a2a801",
+                    dimension: 384,
+                    prefixes: .bge,
+                    maximumBatchSize: 2
+                )
+                // This suite runs its tests one at a time,
+                // and no other suite embeds text in this process.
+                LlamaTestHooks.dropsVector.withLock { $0 = { $0 == 3 } }
+                defer { LlamaTestHooks.dropsVector.withLock { $0 = nil } }
+                await #expect(throws: EmbeddingError.noVector(index: 3)) {
+                    try await small.embed(Self.texts, for: .document)
+                }
+            }
+        #endif
+
         @Test("A related pair scores above an unrelated pair")
         func semantics() async throws {
             let query = try await model.embed("Where does my sister live?", for: .query)
@@ -302,6 +325,12 @@
                     if ExitTestTimer.now() > limit { _exit(9) }
                     usleep(1_000)
                 }
+            }
+
+            /// Waits up to ten seconds for `semaphore`,
+            /// and exits with `status` if it isn't signaled by then.
+            static func waitOrExit(for semaphore: DispatchSemaphore, status: CInt) {
+                if semaphore.wait(timeout: .now() + 10) == .timedOut { _exit(status) }
             }
 
             /// Starts an embedding in another task,
@@ -446,6 +475,110 @@
                 }
                 let elapsed = try #require(await ExitTestTimer.finish(name, watchdog))
                 #expect(elapsed >= .seconds(LlamaLifecycle.cleanupDeadline))
+            }
+
+            @Test("A process exits normally after its first embedding is cancelled after one batch")
+            func exitAfterCancelledFirstEmbedding() async throws {
+                let watchdog = ExitTestTimer.watch("exitAfterCancelledFirstEmbedding")
+                await #expect(processExitsWith: .success) {
+                    ExitTestTimer.childStarted("exitAfterCancelledFirstEmbedding")
+                    // Load the model without an embedding, so that the next one is the first.
+                    let model = LlamaEmbeddingModel(
+                        modelPath: ProcessInfo.processInfo.environment["LLAMA_EMBEDDING_MODEL_PATH"] ?? "",
+                        name: "bge-small-en-v1.5-q8_0",
+                        version: "1",
+                        dimension: 384,
+                        maximumBatchSize: 1
+                    )
+                    try await model.prewarm()
+                    let secondBatch = DispatchSemaphore(value: 0)
+                    let cancelled = DispatchSemaphore(value: 0)
+                    let batches = Locked(0)
+                    LlamaTestHooks.beforeBatch.withLock {
+                        $0 = {
+                            let batch = batches.withLock { count in
+                                count += 1
+                                return count
+                            }
+                            guard batch == 2 else { return }
+                            // Hold the second batch until the task is cancelled,
+                            // so that the embedding stops after exactly one batch.
+                            secondBatch.signal()
+                            // A distinct status shows that the test never cancelled the task.
+                            if cancelled.wait(timeout: .now() + 10) == .timedOut { _exit(3) }
+                        }
+                    }
+                    let task = Task.detached {
+                        try await model.embed(LlamaEmbeddingModelExitTests.texts, for: .document)
+                    }
+                    // A distinct status shows that the second batch never started.
+                    LlamaEmbeddingModelExitTests.waitOrExit(for: secondBatch, status: 4)
+                    task.cancel()
+                    cancelled.signal()
+                    do {
+                        _ = try await task.value
+                        exit(5)
+                    } catch is CancellationError {}
+                    guard batches.withLock({ $0 }) == 2 else { exit(6) }
+                    ExitTestTimer.stepStarted("exitAfterCancelledFirstEmbedding")
+                    withExtendedLifetime(model) { exit(0) }
+                }
+                await ExitTestTimer.finish("exitAfterCancelledFirstEmbedding", watchdog, measuring: false)
+            }
+
+            @Test("A cache removal after shutdown takes a model leaves its cleanup to shutdown")
+            func removalDuringShutdown() async {
+                let watchdog = ExitTestTimer.watch("removalDuringShutdown")
+                await #expect(processExitsWith: .success) {
+                    ExitTestTimer.childStarted("removalDuringShutdown")
+                    let model = try await LlamaEmbeddingModelExitTests.loadedModel()
+                    let shutdownThreadKey = "removalDuringShutdown.shutdownThread"
+                    // The number of cleanups that have started and not ended.
+                    let running = Locked(0)
+                    let release = DispatchSemaphore(value: 0)
+                    LlamaTestHooks.resourceCleanup.withLock {
+                        $0 = { event in
+                            switch event {
+                            case .willFree:
+                                running.withLock { $0 += 1 }
+                                // Hold a cleanup on any thread but shutdown's
+                                // until shutdown returns, or for at most two seconds.
+                                if Thread.current.threadDictionary[shutdownThreadKey] == nil {
+                                    _ = release.wait(timeout: .now() + 2)
+                                }
+                            case .didFree:
+                                running.withLock { $0 -= 1 }
+                            }
+                        }
+                    }
+                    LlamaTestHooks.beforeShutdownCleanup.withLock {
+                        $0 = {
+                            Thread.current.threadDictionary[shutdownThreadKey] = true
+                            // Shutdown has taken the model,
+                            // so release the engine on another thread now.
+                            let removed = DispatchSemaphore(value: 0)
+                            Task.detached {
+                                await model.removeFromCache()
+                                removed.signal()
+                            }
+                            // A removal that leaves the cleanup to shutdown returns at once.
+                            // Otherwise its cleanup is held, and shutdown goes on after a second.
+                            _ = removed.wait(timeout: .now() + 1)
+                        }
+                    }
+                    ExitTestTimer.stepStarted("removalDuringShutdown")
+                    let result = LlamaLifecycle.shared.shutDown()
+                    let stillRunning = running.withLock { $0 }
+                    release.signal()
+                    // `_exit` skips the exit handlers and static destructors,
+                    // which would race with a cleanup that is still running.
+                    guard result == .freed else { _exit(5) }
+                    // A distinct status shows that shutdown returned
+                    // while another thread still freed the model.
+                    guard stillRunning == 0 else { _exit(6) }
+                    exit(0)
+                }
+                await ExitTestTimer.finish("removalDuringShutdown", watchdog, measuring: false)
             }
 
             @Test("After the exit handler runs, a loaded model is unavailable, and embed and prewarm throw")

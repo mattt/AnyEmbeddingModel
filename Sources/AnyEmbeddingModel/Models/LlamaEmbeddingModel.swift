@@ -134,11 +134,13 @@
         /// because llama.cpp doesn't protect the callback against concurrent changes.
         /// Setting this property changes only the level that the callback reads.
         ///
-        /// AnyLanguageModel's `LlamaLanguageModel` also installs its own callback once,
-        /// before its own first llama.cpp call.
-        /// The callback that was installed last decides which messages appear,
-        /// and changing either package's level afterward
-        /// doesn't install or replace a callback.
+        /// AnyLanguageModel's `LlamaLanguageModel` installs its own callback
+        /// each time its `logLevel` is set.
+        /// The callback that was installed last decides which messages appear.
+        /// So setting AnyLanguageModel's level after this package's first load
+        /// replaces this package's callback,
+        /// and this property then has no effect,
+        /// because this package doesn't install its callback again.
         public static var logLevel: LogLevel {
             get { LlamaRuntime.logLevel.withLock { $0 } }
             set { LlamaRuntime.logLevel.withLock { $0 = newValue } }
@@ -406,7 +408,10 @@
         /// llama.cpp couldn't tokenize a text.
         case tokenizationFailed
 
-        /// llama.cpp couldn't run a batch, or returned no vector for a text.
+        /// llama.cpp couldn't run a batch.
+        ///
+        /// If llama.cpp runs a batch but returns no vector for a text,
+        /// the model throws ``EmbeddingError/Kind/noVector`` instead.
         case decodingFailed
 
         public var errorDescription: String? {
@@ -493,7 +498,9 @@
         /// ggml doesn't report when it creates such an object,
         /// so the package can't tell whether an earlier registration still runs early enough.
         /// So every load registers the handler again when it ends,
-        /// and so does each model's first embedding, which compiles ggml's GPU kernels.
+        /// and so does each model's first embedding that runs a batch,
+        /// which compiles ggml's GPU kernels,
+        /// when it ends, even if it throws.
         /// The last registration runs first, and the handler does nothing after its first run.
         ///
         /// If a registration fails,
@@ -738,20 +745,30 @@
             condition.withLock { resources[ObjectIdentifier(model)] = model }
         }
 
-        /// Frees the resources of a model, unless ``shutDown(deadline:)`` freed them already.
+        /// Frees the resources of a model,
+        /// unless ``shutDown(deadline:)`` has taken them to free.
+        ///
+        /// Exactly one caller frees each model's resources:
+        /// the caller that removes them from the registry under the lock.
+        /// If shutdown has taken them,
+        /// this method returns at once and leaves the cleanup to shutdown,
+        /// so that shutdown can't return while this thread still frees them.
         ///
         /// The cleanup runs even while the process is exiting.
         /// It counts as running work,
-        /// so that the exit handler's thread check and deadline apply to it,
+        /// so that the exit handler waits for it,
+        /// and its thread check and deadline apply to it,
         /// and it calls llama.cpp without the lock:
         /// llama.cpp logs while it frees a model,
         /// and a log callback that calls `exit` runs the exit handler on this thread,
         /// which takes the lock.
         func free(_ model: LlamaModelResources) {
-            condition.withLock {
-                resources[ObjectIdentifier(model)] = nil
+            let ownsCleanup = condition.withLock {
+                guard resources.removeValue(forKey: ObjectIdentifier(model)) != nil else { return false }
                 activeOperations += 1
+                return true
             }
+            guard ownsCleanup else { return }
             runCounted { model.free() }
         }
 
@@ -783,10 +800,15 @@
                 resources = [:]
                 return .freed
             }
+            // Shutdown now owns the cleanup of these models,
+            // and `free(_:)` leaves them alone.
             // Free without the lock, as in `free(_:)`.
             // If a log callback calls `exit` here, this handler runs again and does nothing.
             // With nothing to free, no watchdog starts.
             guard !models.isEmpty else { return result }
+            #if DEBUG
+                LlamaTestHooks.beforeShutdownCleanup.withLock { $0 }?()
+            #endif
             Self.withAbortDeadline(Self.cleanupDeadline) {
                 for model in models {
                     model.free()
@@ -900,6 +922,11 @@
             /// stops at once.
             static let beforeBatch = Locked<(@Sendable () -> Void)?>(nil)
 
+            /// Runs for each text after its batch,
+            /// with the index of the text in the caller's input,
+            /// and makes the embedding find no vector for the text if it returns true.
+            static let dropsVector = Locked<(@Sendable (Int) -> Bool)?>(nil)
+
             /// Runs for each llama.cpp log message, before the level filter,
             /// on the thread that logs it.
             static let onLog = Locked<(@Sendable () -> Void)?>(nil)
@@ -914,6 +941,23 @@
 
             /// Runs on the cleanup watchdog's thread after its deadline passes.
             static let cleanupWatchdog = Locked<(@Sendable (CleanupWatchdogEvent) -> Void)?>(nil)
+
+            /// Runs in ``LlamaLifecycle/shutDown(deadline:)``
+            /// after shutdown has taken the models to free
+            /// and before it frees them,
+            /// on the shutdown's thread.
+            static let beforeShutdownCleanup = Locked<(@Sendable () -> Void)?>(nil)
+
+            /// A point in ``LlamaModelResources/free()``.
+            enum ResourceCleanupEvent: Sendable, Equatable {
+                /// The cleanup is about to call llama.cpp.
+                case willFree
+                /// The cleanup has freed the context and the model.
+                case didFree
+            }
+
+            /// Runs in ``LlamaModelResources/free()``, on the thread that frees.
+            static let resourceCleanup = Locked<(@Sendable (ResourceCleanupEvent) -> Void)?>(nil)
         }
     #endif
 
@@ -939,33 +983,36 @@
         let model: OpaquePointer
         let vocab: OpaquePointer
 
-        /// Guards `cachedContext` and `isFreed`.
+        /// Guards `cachedContext`.
         private let lock = NSLock()
         private var cachedContext: CachedContext?
-        private var isFreed = false
 
         init(model: OpaquePointer, vocab: OpaquePointer) {
             self.model = model
             self.vocab = vocab
         }
 
-        /// Frees the cached context and the model, once.
+        /// Frees the cached context and the model.
         ///
         /// Call it only through ``LlamaLifecycle``,
+        /// which calls it once, from the one caller that owns the cleanup,
         /// when no load or embedding uses the model.
         func free() {
             // Take the context under the lock, and call llama.cpp without it.
-            let (isFirst, context): (Bool, OpaquePointer?) = lock.withLock {
-                guard !isFreed else { return (false, nil) }
-                isFreed = true
+            let context: OpaquePointer? = lock.withLock {
                 defer { cachedContext = nil }
-                return (true, cachedContext?.context)
+                return cachedContext?.context
             }
-            guard isFirst else { return }
+            #if DEBUG
+                LlamaTestHooks.resourceCleanup.withLock { $0 }?(.willFree)
+            #endif
             if let context {
                 llama_free(context)
             }
             llama_model_free(model)
+            #if DEBUG
+                LlamaTestHooks.resourceCleanup.withLock { $0 }?(.didFree)
+            #endif
         }
 
         /// Puts a new context in the cache.
@@ -1038,7 +1085,7 @@
         /// The context length that the model was trained with, or `nil` if the file doesn't say.
         let trainedContextLength: Int?
 
-        /// Whether an embedding has run, which registers the exit handler again.
+        /// Whether an embedding has run a batch and then registered the exit handler again.
         private let hasEmbedded = Locked(false)
 
         /// Loads the model and checks that it produces one vector for each text.
@@ -1182,6 +1229,14 @@
                 tokenCapacity: capacity,
                 sequenceCapacity: sequenceCapacity(for: settings)
             )
+            // The first batch can create ggml's GPU objects,
+            // so register the exit handler after it, as a load does,
+            // even if a later batch throws or the task is cancelled.
+            // The registration runs before `perform(_:)` stops counting this embedding.
+            var hasRunBatch = false
+            defer {
+                if hasRunBatch { registerExitHandlerAfterFirstEmbedding() }
+            }
             var vectors: [[Float]] = []
             vectors.reserveCapacity(inputs.count)
             for group in groups {
@@ -1190,16 +1245,28 @@
                 #endif
                 try Task.checkCancellation()
                 try LlamaLifecycle.shared.stopIfExiting()
-                vectors += try run(group.map { tokens[$0] }, batch: batch, context: context)
-            }
-            let isFirstEmbedding = hasEmbedded.withLock { hasEmbedded in
-                defer { hasEmbedded = true }
-                return !hasEmbedded
-            }
-            if isFirstEmbedding {
-                LlamaRuntime.registerExitHandler()
+                hasRunBatch = true
+                vectors += try run(
+                    group.map { tokens[$0] },
+                    firstIndex: group.lowerBound,
+                    batch: batch,
+                    context: context
+                )
             }
             return vectors
+        }
+
+        /// Registers the exit handler again after the model's first batch.
+        ///
+        /// The registration happens under the lock,
+        /// so that no other embedding finds the first embedding done
+        /// before the handler is registered.
+        private func registerExitHandlerAfterFirstEmbedding() {
+            hasEmbedded.withLock { hasEmbedded in
+                guard !hasEmbedded else { return }
+                LlamaRuntime.registerExitHandler()
+                hasEmbedded = true
+            }
         }
 
         /// Splits texts into consecutive groups,
@@ -1228,8 +1295,12 @@
         }
 
         /// Runs one call with one sequence for each text, and returns the pooled vectors.
+        ///
+        /// - Parameter firstIndex: The index of the first sequence's text in the caller's input,
+        ///   which an error for a missing vector reports.
         private func run(
             _ sequences: [[llama_token]],
+            firstIndex: Int,
             batch: llama_batch,
             context: OpaquePointer
         ) throws -> [[Float]] {
@@ -1256,8 +1327,14 @@
                 throw LlamaEmbeddingModelError.decodingFailed
             }
             return try sequences.indices.map { sequence in
-                guard let vector = llama_get_embeddings_seq(context, llama_seq_id(sequence)) else {
-                    throw LlamaEmbeddingModelError.decodingFailed
+                var vector = llama_get_embeddings_seq(context, llama_seq_id(sequence))
+                #if DEBUG
+                    if LlamaTestHooks.dropsVector.withLock({ $0 })?(firstIndex + sequence) == true {
+                        vector = nil
+                    }
+                #endif
+                guard let vector else {
+                    throw EmbeddingError.noVector(index: firstIndex + sequence)
                 }
                 return Array(UnsafeBufferPointer(start: vector, count: dimension))
             }
